@@ -624,6 +624,8 @@ elf_type (const char *type)
     return ET_EXEC;
   if (strcasecmp (type, "dyn") == 0)
     return ET_DYN;
+  if (strcasecmp (type, "pspexec") == 0)
+    return ET_PSPEXEC;
   if (strcasecmp (type, "none") == 0)
     return ET_NONE;
 

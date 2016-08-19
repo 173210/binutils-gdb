@@ -281,6 +281,7 @@ case $basic_machine in
 	| mips64vr4300 | mips64vr4300el \
 	| mips64vr5000 | mips64vr5000el \
 	| mips64vr5900 | mips64vr5900el \
+       | mipsallegrex | mipsallegrexel \
 	| mipsisa32 | mipsisa32el \
 	| mipsisa32r2 | mipsisa32r2el \
 	| mipsisa32r6 | mipsisa32r6el \
@@ -407,6 +408,7 @@ case $basic_machine in
 	| mips64vr4300-* | mips64vr4300el-* \
 	| mips64vr5000-* | mips64vr5000el-* \
 	| mips64vr5900-* | mips64vr5900el-* \
+       | mipsallegrex-* | mipsallegrexel-* \
 	| mipsisa32-* | mipsisa32el-* \
 	| mipsisa32r2-* | mipsisa32r2el-* \
 	| mipsisa32r6-* | mipsisa32r6el-* \
@@ -1040,6 +1042,10 @@ case $basic_machine in
 		;;
 	ps2)
 		basic_machine=i386-ibm
+		;;
+	psp)
+		basic_machine=mipsallegrexel-psp
+		os=-elf
 		;;
 	pw32)
 		basic_machine=i586-unknown

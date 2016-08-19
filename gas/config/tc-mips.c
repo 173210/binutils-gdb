@@ -506,8 +506,11 @@ static int mips_32bitmode = 0;
 /* True if CPU has a dror instruction.  */
 #define CPU_HAS_DROR(CPU)	((CPU) == CPU_VR5400 || (CPU) == CPU_VR5500)
 
+/* True if CPU is in the Allegrex family */
+#define CPU_IS_ALLEGREX(CPU) ((CPU) == CPU_ALLEGREX)
+
 /* True if CPU has a ror instruction.  */
-#define CPU_HAS_ROR(CPU)	CPU_HAS_DROR (CPU)
+#define CPU_HAS_ROR(CPU)	(CPU_HAS_DROR (CPU) || CPU_IS_ALLEGREX (CPU))
 
 /* True if CPU is in the Octeon family */
 #define CPU_IS_OCTEON(CPU) ((CPU) == CPU_OCTEON || (CPU) == CPU_OCTEONP \
@@ -551,6 +554,7 @@ static int mips_32bitmode = 0;
    || mips_opts.arch == CPU_R16000                    \
    || mips_opts.arch == CPU_RM7000                    \
    || mips_opts.arch == CPU_VR5500                    \
+   || mips_opts.arch == CPU_ALLEGREX                  \
    || mips_opts.micromips                             \
    )
 
@@ -1297,8 +1301,8 @@ static void append_insn
    bfd_boolean expansionp);
 static void mips_no_prev_insn (void);
 static void macro_build (expressionS *, const char *, const char *, ...);
-static void mips16_macro_build
-  (expressionS *, const char *, const char *, va_list *);
+static void mips16_macro_build_extra
+  (expressionS *, unsigned int, const char *, const char *, va_list *);
 static void load_register (int, expressionS *, int);
 static void macro_start (void);
 static void macro_end (void);
@@ -2499,7 +2503,7 @@ struct regname {
 };
 
 #define RNUM_MASK	0x00000ff
-#define RTYPE_MASK	0x0ffff00
+#define RTYPE_MASK	0x1fffff00
 #define RTYPE_NUM	0x0000100
 #define RTYPE_FPU	0x0000200
 #define RTYPE_FCC	0x0000400
@@ -2516,7 +2520,12 @@ struct regname {
 #define RTYPE_R5900_R	0x0200000
 #define RTYPE_R5900_ACC	0x0400000
 #define RTYPE_MSA	0x0800000
-#define RWARN		0x8000000
+#define RTYPE_VFPU_SCALAR 0x1000000
+#define RTYPE_VFPU_VECTOR 0x2000000
+#define RTYPE_VFPU_MATRIX 0x4000000
+#define RTYPE_VFPU_T 0x8000000
+#define RTYPE_VFPU_HAS_REMAINDER 0x10000000
+#define RWARN		0x20000000
 
 #define GENERIC_REGISTER_NUMBERS \
     {"$0",	RTYPE_NUM | 0},  \
@@ -2806,6 +2815,8 @@ mips_parse_register (char **sptr, unsigned int *symval_ptr,
   char *s, *e, *m;
   const char *q;
   unsigned int channels, symval, bit;
+  unsigned int type, field, index, matrix, column, row;
+  bfd_boolean transpose;
 
   /* Find end of name.  */
   s = e = *sptr;
@@ -2815,11 +2826,11 @@ mips_parse_register (char **sptr, unsigned int *symval_ptr,
     ++e;
 
   channels = 0;
-  if (!mips_parse_register_1 (s, e, &symval))
-    {
-      if (!channels_ptr)
-	return FALSE;
+  if (mips_parse_register_1 (s, e, &symval))
+    goto parsed;
 
+  if (channels_ptr)
+    {
       /* Eat characters from the end of the string that are valid
 	 channel suffixes.  The preceding register must be $ACC or
 	 end with a digit, so there is no ambiguity.  */
@@ -2832,12 +2843,130 @@ mips_parse_register (char **sptr, unsigned int *symval_ptr,
 	    channels |= bit;
 	  }
 
-      if (channels == 0
-	  || !mips_parse_register_1 (s, m, &symval)
-	  || (symval & (RTYPE_VI | RTYPE_VF | RTYPE_R5900_ACC)) == 0)
-	return FALSE;
+      if (channels != 0
+	  && mips_parse_register_1 (s, m, &symval)
+	  && (symval & (RTYPE_VI | RTYPE_VF | RTYPE_R5900_ACC)) != 0)
+	goto parsed;
     }
 
+  if (s[0] == '$')
+    {
+      symval = 0;
+      m = s + 1;
+      while (ISDIGIT(*m) && symval < 256)
+	{
+	  symval *= 10;
+	  symval += *m - '0';
+	  m++;
+	  if (m == e)
+	    {
+	      if (symval < 128)
+		break;
+
+	      symval |= RTYPE_VFPU_CR;
+	      goto parsed;
+	    }
+	}
+    }
+
+  m = s;
+  if (m == e)
+    return FALSE;
+
+  switch (TOUPPER(*m))
+    {
+    case 'S':
+      type = RTYPE_VFPU_SCALAR;
+      break;
+
+    case 'C':
+      type = RTYPE_VFPU_VECTOR_PQ;
+      transpose = FALSE;
+      break;
+
+    case 'R':
+      type = RTYPE_VFPU_VECTOR_PQ;
+      transpose = TRUE;
+      break;
+
+    case 'M':
+      type = RTYPE_VFPU_MATRIX_PQ;
+      transpose = FALSE;
+      break;
+
+    case 'E':
+      type = RTYPE_VFPU_MATRIX_PQ;
+      transpose = TRUE;
+      break;
+
+    default:
+      return FALSE;
+    }
+
+  m++;
+  if (m == e)
+    return FALSE;
+
+  if (*m < '0' || *m >= '0' + VFPU_REG_MASK_MATRIX)
+    return FALSE;
+
+  matrix = *m - '0';
+
+  m++;
+  if (m == e)
+    return FALSE;
+
+  if (*m < '0' || *m > '4')
+    return FALSE;
+
+  column = *m - '0';
+
+  m++;
+  if (m == e)
+    return FALSE;
+
+  if (*m < '0' || *m > '4')
+    return FALSE;
+
+  row = *m - '0';
+
+  symval = matrix << VFPU_REG_SH_MATRIX;
+  if (transpose)
+    {
+      field = column;
+      index = row;
+    }
+  else
+    {
+      field = row;
+      index = column;
+    }
+
+  if (type != RTYPE_VFPU_SCALAR)
+    {
+      if ((field & 1))
+	{
+	  if ((field & 2))
+	    {
+	      type |= RTYPE_VFPU_HAS_REMAINDER;
+	    }
+	  else
+	    {
+	      type |= RTYPE_VFPU_TRIPLE;
+	      field <<= 1;
+	    }
+	}
+
+      if (transpose)
+	field |= 1;
+    }
+
+  symval = type
+	    | (matrix << VFPU_REG_SH_MATRIX)
+	    | (field << VFPU_REG_SH_FIELD)
+	    | (index << VFPU_REG_SH_INDEX);
+
+parsed:
   *sptr = e;
   *symval_ptr = symval;
   if (channels_ptr)
@@ -2892,6 +3021,294 @@ mips_parse_vu0_channels (char *s, unsigned int *channels)
   return s;
 }
 
+/* Parse a VFPU "s|p|t|q" suffix S and store the associated
+   mask in *mask.  Return a pointer to the first unconsumed character.  */
+static char *
+mips_parse_vfpu_suffix (char *s, unsigned int *mask, unsigned int *insn2)
+{
+  switch (*s)
+    {
+      case 's':
+	*mask = 0;
+	*insn2 = INSN2_VFPU_SUFFIX_S;
+	break;
+
+      case 'p':
+	*mask = 1 << OP_MASK_VFPUSUFFIX_LO;
+	*insn2 = INSN2_VFPU_SUFFIX_P;
+	break;
+
+      case 't':
+	*mask = 1 << OP_MASK_VFPUSUFFIX_HI;
+	*insn2 = INSN2_VFPU_SUFFIX_T;
+	break;
+
+      case 'q':
+	*mask = (1 << OP_MASK_VFPUSUFFIX_HI) | (1 << OP_MASK_VFPUSUFFIX_LO);
+	*insn2 = INSN2_VFPU_SUFFIX_Q;
+	break;
+
+      default:
+	return s;
+    }
+
+  return s + 1;
+}
+
+static bfd_boolean
+mips_parse_vfpu_cond (char **sptr, unsigned int *cond)
+{
+  static const char mnemonics[][2] =
+    {
+      "FL", "EQ", "LT", "LE", "TR", "NE", "GE", "GT",
+      "EZ", "EN", "EI", "ES", "NZ", "NN", "NI", "NS"
+    };
+
+  unsigned int index;
+  char *s;
+
+  s = *sptr;
+
+  if (!s[0] || !s[1] || is_part_of_name(s[2]))
+    return FALSE;
+
+  for (index = 0; index < ARRAY_SIZE (mnemonics); index++)
+    if (strncasecmp(mnemonics[index], s, 2) == 0)
+      {
+	*cond = index;
+       (*s) += 2;
+	return TRUE;
+      }
+
+  return FALSE;
+}
+
+static bfd_boolean
+mips_parse_vfpu_const (char **sptr, unsigned int *uval)
+{
+  static const char * const mnemonics[] =
+    {
+      "VFPU_HUGE", "VFPU_SQRT2", "VFPU_SQRT1_2",
+      "VFPU_2_SQRTPI", "VFPU_2_PI", "VFPU_1_PI", "VFPU_PI_4",
+      "VFPU_PI_2", "VFPU_PI", "VFPU_E", "VFPU_LOG2E",
+      "VFPU_LOG10E", "VFPU_LN2", "VFPU_LN10", "VFPU_2PI",
+      "VFPU_PI_6", "VFPU_LOG10TWO", "VFPU_LOG2TEN", "VFPU_SQRT3_2"
+    };
+
+  unsigned int index;
+  const char *mnemonic;
+  char *s;
+
+  for (index = 0; index < ARRAY_SIZE (mnemonics); index++)
+    {
+      mnemonic = menimonics[index];
+      s = *sptr;
+
+      do
+	{
+	  if (!*mnemonic)
+	    {
+	      if (!is_part_of_name(*s))
+		{
+		  *sptr = s;
+		  *uval = index + 1;
+		  return TRUE;
+		}
+
+	      break;
+	    }
+	}
+      while (*mnemonic == *s);
+    }
+
+  return FALSE;
+}
+
+static bfd_boolean
+mips_parse_vfpu_rot (char **sptr,
+		     unsigned int *code, unsigned int *number)
+{
+  unsigned int count, sin, cos;
+  unsigned int sign_count, sin_count, cos_count;
+  const char *error;
+  char *s;
+
+  error = NULL;
+  s = *sptr;
+
+  if (*s != '[')
+    goto not_rotator;
+
+  s++;
+
+  count = 0;
+  sign_count = 0;
+  sin_count = 0;
+  cos_count = 0;
+  while (*s != ']')
+    {
+      SKIP_SPACE_TABS (s);
+
+      if (*s == '-')
+	{
+	  s++;
+	  SKIP_SPACE_TABS (s);
+
+	  if ((*s != 's') && (*s != 'S'))
+	    {
+	      error = "only sign of sine can be inverted";
+	      goto err;
+	    }
+
+	  sign = 1;
+	  sign_count++;
+	  s++;
+	}
+
+      switch (*s)
+	{
+	case 'C':
+	case 'c':
+	  cos = count;
+	  cos_count++;
+	  break;
+
+	case 'S':
+	case 's':
+	  sin = count;
+	  sin_count++;
+	  break;
+
+	case ',':
+	case ']':
+	  error = "no value in an element";
+	  goto err;
+
+	case '0':
+	  break;
+
+	default:
+	  error = "invalid character for rotator";
+	  goto err;
+	}
+
+      s++;
+      SKIP_SPACE_TABS (s);
+
+      if (*s == 0)
+	{
+	  error = "missing `]'";
+	  goto err;
+	}
+      else if (*s != ',' && *s != ']')
+	{
+	  error = "too many characters in an element";
+	  goto err;
+	}
+
+      count++;
+      if (count > 4)
+	{
+	  error = "too many elements in rotator";
+	  goto err;
+	}
+
+      s++;
+    }
+
+  if (cos_count == 0)
+    {
+      if (sin_count == 0)
+	{
+	  if (count == 1)
+	    {
+	      sin = 3;
+	    }
+	  else if (count == 2)
+	    {
+	      sin = 2;
+	    }
+	  else
+	    {
+	      error = "at least one sine or cosine is needed for rotator\n"
+		      "with more than 4 elements";
+	      goto err;
+	    }
+	}
+
+      cos = 3;
+    }
+  else if (sin_count == 0)
+    {
+      sin = 3;
+    }
+
+  if (cos_count > 1)
+    {
+      error = "rotator should have only one cosine";
+      goto err;
+    }
+
+  if (sin_count > 1)
+    {
+      if (sin_count + cos_count != count)
+	{
+	  error = "rotator should not have 0 if sine is present";
+	  goto err;
+	}
+
+      if (count == 4 && sin_count >= 4)
+	{
+	  error = "rotator can contain three sines at most";
+	  goto err;
+	}
+
+      sin = cos;
+    }
+
+  if (sign && sign_count != sin_count)
+    {
+      error = "all sines should be negative if one of them is";
+      goto err;
+    }
+
+  *sptr = s;
+  *code = ((sign_count ? 1 : 0) << VFPU_ROT_SH_NEGATE)
+	     | (cos << VFPU_ROT_SH_COS) | (sin << VFPU_ROT_SH_SIN);
+  *number = count;
+
+  return TRUE;
+
+not_rotator:
+  return FALSE;
+
+err:
+  set_insn_error (0, _(error));
+  *sptr = NULL;
+
+  return TRUE;
+}
+
+static bfd_boolean
+mips_parse_vfpu_rwb (char **sptr, unsigned int *uval)
+{
+  char *s;
+
+  s = *sptr;
+
+  if (!s[0] || !s[1] || is_part_of_name(s[2]))
+    return FALSE;
+
+  if (strncasecmp (s, "WT", 2) == 0)
+    *uval = 0x0;
+  else if (strncasecmp (s, "WB", 2) == 0)
+    *uval = 0x1;
+  else
+    return FALSE;
+
+  return TRUE;
+}
+
 /* Token types for parsed operand lists.  */
 enum mips_operand_token_type {
   /* A plain register, e.g. $f2.  */
@@ -2899,6 +3316,21 @@ enum mips_operand_token_type {
 
   /* A 4-bit XYZW channel mask.  */
   OT_CHANNELS,
+
+  /* A conditional code for VFPU instructions */
+  OT_VFPU_COND,
+
+  /* A constant code for VFPU instructions */
+  OT_VFPU_CONST,
+
+  /* A rotator code for VFPU instructions */
+  OT_VFPU_ROT,
+
+  /* A read/write access code for VFPU instructions */
+  OT_VFPU_RWB,
+
+  /* A prefix of a VFPU register */
+  OT_VFPU_PREFIX,
 
   /* A constant vector index, e.g. [1].  */
   OT_INTEGER_INDEX,
@@ -2939,6 +3371,32 @@ struct mips_operand_token
     /* The 4-bit channel mask for an OT_CHANNEL_SUFFIX.  */
     unsigned int channels;
 
+    /* The conditional code for an OT_VFPU_COND */
+    unsigned int vfpu_cond;
+
+    /* The constant code for an OT_VFPU_CONST */
+    unsigned int vfpu_const;
+
+    /* The rotator and the number of elements it has for OT_VFPU_ROT */
+    struct {
+      unsigned int code;
+      unsigned int number;
+    } vfpu_rot;
+
+    /* The VFPU register prefix for an OT_VFPU_PREFIX
+	If parameters incompatible with a same register type (Rs or Rd),
+	CONFLICT should be TRUE and other members should contain information
+	valid for Rs. */
+    struct {
+      unsigned int code;
+      unsigned char number;
+      bfd_boolean destination;
+      bfd_boolean conflict;
+    } vfpu_prefix;
+
+    /* The read/write access code for an OT_VFPU_RWB */
+    unsigned int vfpu_rwb;
+
     /* The integer value of an OT_INTEGER_INDEX.  */
     addressT index;
 
@@ -2968,7 +3426,6 @@ struct mips_operand_token
     char ch;
   } u;
 };
-
 /* An obstack used to construct lists of mips_operand_tokens.  */
 static struct obstack mips_operand_tokens;
 
@@ -2980,6 +3437,335 @@ mips_add_token (struct mips_operand_token *token,
 {
   token->type = type;
   obstack_grow (&mips_operand_tokens, token, sizeof (*token));
+}
+
+static bfd_boolean
+mips_parse_vfpu_prefix_element (char **sptr, bfd_boolean *destination,
+				bfd_boolean *conflict,
+				unsigned int *attribute, unsigned int *value)
+{
+  bfd_boolean destination_stack;
+  bfd_boolean conflict_stack;
+  unsigned int attribute_stack;
+  unsigned int value_stack;
+  char *s;
+  char c;
+
+  s = *sptr;
+  destination_stack = FALSE;
+  conflict_stack = FALSE;
+  attribute_stack = 0;
+  if (*s == '-')
+    {
+      attribute_stack |= 1 << VFPU_PREFIX_ST_SH_NEGATE;
+      s++;
+      SKIP_SPACE_TABS (s);
+    }
+
+  if (*s == '|')
+    {
+      attribute_stack |= 1 << VFPU_PREFIX_ST_SH_ABS;
+    }
+
+  c = *s;
+  s++;
+  SKIP_SPACE_TABS (s);
+
+  switch (c)
+    {
+    case '0':
+      attribute_stack |= 1 << VFPU_PREFIX_ST_SH_CONST;
+      break;
+
+    case '1':
+      attribute_stack |= 1 << VFPU_PREFIX_ST_SH_CONST;
+
+      if (*s == '/')
+	{
+	  s++;
+	  SKIP_SPACE_TABS (s);
+	  switch (*s)
+	    {
+	    case '2':
+	      value_stack = 3;
+	      break;
+
+	    case '3':
+	      value_stack = 5;
+	      break;
+
+	    case '4':
+	      value_stack = 6;
+	      break;
+
+	    case '6':
+	      value_stack = 7;
+	      break;
+
+	    default:
+	      return FALSE;
+	    }
+
+	  s++;
+	  SKIP_SPACE_TABS (s);
+	}
+      else
+	{
+	  value_stack = 1;
+	}
+	break;
+
+    case '2':
+      attribute_stack |= 1 << VFPU_PREFIX_ST_SH_CONST;
+      value_stack = 2;
+      break;
+
+    case '3':
+      attribute_stack |= 1 << VFPU_PREFIX_ST_SH_CONST;
+      value_stack = 4;
+      break;
+
+    case 'X':
+    case 'x':
+      value_stack = 0;
+      break;
+
+    case 'Y':
+    case 'y':
+      value_stack = 1;
+      break;
+
+    case 'Z':
+    case 'z':
+      value_stack = 2;
+      break;
+
+    case 'W':
+    case 'w':
+      value_stack = 3;
+      break;
+
+    case '[':
+      switch (*s)
+	{
+	case '0':
+	  value_stack = 1;
+	  break;
+
+	case '-':
+	  s++;
+	  SKIP_SPACE_TABS (s);
+	  if (*s == '1')
+	    {
+	      value_stack = 3;
+	      break;
+	    }
+	/* FALLTHROUGH */
+	default:
+	  return FALSE:
+	}
+
+      s++;
+      SKIP_SPACE_TABS (s);
+      if (*s != ':')
+	return FALSE;
+
+      s++;
+      SKIP_SPACE_TABS (s);
+      if (*s != '1')
+	return FALSE;
+
+      s++;
+      SKIP_SPACE_TABS (s);
+      if (*s != ']')
+	return FALSE;
+
+      s++;
+      SKIP_SPACE_TABS (s);
+
+      if (attribute_stack == 0)
+	{
+	  destination_stack = TRUE;
+	}
+      else
+	{
+	  conflict_stack = TRUE;
+	  value_stack = 0;
+	}
+
+      break;
+
+    case 'm':
+      if (attribute_stack == 0)
+	{
+	  attribute_stack |= 1 << VFPU_PREFIX_D_SH_MASK;
+	  destination_stack = TRUE;
+	}
+      else
+	{
+	  conflict_stack = TRUE;
+	}
+
+    default:
+      return FALSE;
+    }
+
+  if (!destination_stack && (attribute_stack & (1 << VFPU_PREFIX_ST_SH_ABS)))
+  {
+    if (*s != '|')
+      return FALSE;
+
+    s++;
+    SKIP_SPACE_TABS (s);
+  }
+
+  *sptr = s;
+  *destination = destination_stack;
+  *conflict = conflict_stack;
+  *attribute = attribute_stack;
+  *value = value_stack;
+
+  return TRUE;
+}
+
+/* Parse a token from S. This function is special for VFPU register
+   prefix */
+static char *
+mips_parse_vfpu_prefix (char *s)
+{
+  struct mips_operand_token token;
+  bfd_boolean destination;
+  bfd_boolean identified;
+  bfd_boolean conflict;
+  unsigned int attribute;
+  unsigned int value;
+  unsigned int count;
+
+  identified = FALSE;
+  token.u.vfpu_prefix.code = 0;
+  token.u.vfpu_prefix.destination = FALSE;
+  token.u.vfpu_prefix.conflict = FALSE;
+  count = 0;
+  while (TRUE)
+    {
+      if (!mips_parse_vfpu_prefix_element (&s, &destination, &conflict,
+					   &attribute, &value))
+	return NULL;
+
+      if (destination || attribute != 0)
+	{
+	  if (identified)
+	    {
+	      if (destination != token.u.vfpu_prefix.destination)
+		token.u.vfpu_prefix.conflict = TRUE;
+	    }
+	  else
+	    {
+	      identified = TRUE;
+	      token.u.vfpu_prefix.destination = destination;
+	    }
+	}
+
+      if (token.u.vfpu_prefix.conflict)
+	token.u.vfpu_prefix.conflict = TRUE;
+
+      token.u.vfpu_prefix.code = (attribute << count) | (value << (count * 2));
+
+      count++;
+      if (count >= 4)
+	break;
+
+      if (*s != ',')
+	return NULL;
+
+      s++;
+      SKIP_SPACE_TABS (s);
+    }
+
+  token.u.vfpu_prefix.number = count;
+
+  if (token.u.vfpu_prefix.destination)
+    {
+      while (count < 4)
+	{
+	  token.u.vfpu_prefix.code |= 1 << (VFPU_PREFIX_D_SH_MASK + index);
+	  count++;
+	}
+    }
+
+  mips_add_token (&token, OT_VFPU_PREFIX);
+  return s;
+}
+
+static bfd_boolean
+mips_parse_vfpu_prefix_inline (char **sptr, unsigned int regno)
+{
+  struct mips_operand_token token;
+  bfd_boolean destination;
+  bfd_boolean identified;
+  bfd_boolean conflict;
+  bfd_boolean token_identified;
+  unsigned int attribute;
+  unsigned int value;
+  unsigned int count;
+
+  identified = FALSE;
+  token.u.vfpu_prefix.destination = FALSE;
+  token.u.vfpu_prefix.conflict = FALSE;
+  count = 0;
+  while (*s != ']')
+    {
+      if (!mips_parse_vfpu_prefix_element (&s, &destination, &conflict,
+					   &attribute, &value))
+	return FALSE;
+
+      /* if it is a constant or a different varaible */
+      if (destination || attribute != 0 || value != count)
+	{
+	  if (identified)
+	    {
+	      if (destination != token.u.vfpu_prefix.destination)
+		conflict = TRUE;
+	    }
+	  else
+	    {
+	      identified = TRUE;
+	      token.u.vfpu_prefix.destination = destination;
+	    }
+	}
+
+      if (conflict && !token.u.vfpu_prefix.conflict)
+	{
+	  token.u.vfpu_prefix.conflict = TRUE;
+	  if (token.u.vfpu_prefix.destination)
+	    {
+	      token.u.vfpu_prefix.destionation = FALSE;
+	      token.u.vfpu_prefix.code = 0;
+	    }
+	}
+
+      if (count <= 4)
+	{
+	  if (!token.u.vfpu_prefix.conflict || !destination)
+	    token.u.vfpu_prefix.code = (attribute << count)
+				       | (value << (count * 2));
+
+	  count++;
+	}
+    }
+
+  token.u.vfpu_prefix.number = count;
+
+  if (token.u.vfpu_prefix.destination)
+    {
+      while (count < 4)
+	{
+	  token.u.vfpu_prefix.code |= 1 << (VFPU_PREFIX_D_SH_MASK + index);
+	  count++;
+	}
+    }
+
+  return s;
 }
 
 /* Check whether S is '(' followed by a register name.  Add OT_CHAR
@@ -3053,7 +3839,7 @@ mips_parse_argument_token (char *s, char float_format)
 {
   char *end, *save_in;
   const char *err;
-  unsigned int regno1, regno2, channels;
+  unsigned int regno1, regno2, channels, cond;
   struct mips_operand_token token;
 
   /* First look for "($reg", since we want to treat that as an
@@ -3114,6 +3900,8 @@ mips_parse_argument_token (char *s, char float_format)
 	  SKIP_SPACE_TABS (s);
 	  if (mips_parse_register (&s, &token.u.regno, NULL))
 	    mips_add_token (&token, OT_REG_INDEX);
+	  else if (mips_parse_vfpu_prefix_inline (&s, &token.u.regno))
+	    mips_add_token (&token, OT_VFPU_PREFIX);
 	  else
 	    {
 	      expressionS element;
@@ -3136,6 +3924,33 @@ mips_parse_argument_token (char *s, char float_format)
 	    }
 	  ++s;
 	}
+      return s;
+    }
+
+  if (mips_parse_vfpu_cond (&s, &token.u.vfpu_cond))
+    {
+      mips_add_token (&token, OT_VFPU_COND);
+      return s;
+    }
+
+  if (mips_parse_vfpu_const (&s, &token.u.vfpu_const))
+    {
+      mips_add_token (&token, OT_VFPU_CONST);
+      return s;
+    }
+
+  if (mips_parse_vfpu_rot (&s, &token.u.vfpu_rot.code,
+			   &token.u.vfpu_rot.number))
+    {
+      if (s != NULL)
+        mips_add_token (&token, OT_VFPU_ROT);
+
+      return s;
+    }
+
+  if (mips_parse_vfpu_rwb (&s, &token.u.vfpu_rwb)
+    {
+      mips_add_token (&token, OT_VFPU_RWB);
       return s;
     }
 
@@ -3170,23 +3985,35 @@ mips_parse_argument_token (char *s, char float_format)
   return s;
 }
 
-/* S points to the operand list for an instruction.  FLOAT_FORMAT is 'f'
+/* S points to the operand list for an instruction.  FORMAT is 'f'
    if expressions should be treated as 32-bit floating-point constants,
    'd' if they should be treated as 64-bit floating-point constants,
+   'p' if they should be treated as constants for VFPU prefixes of Rs and Rt,
+   'q' if they should be treated as constants for VFPU prefixes of Rd,
    or 0 if they should be treated as integer expressions (the usual case).
 
    Return a list of tokens on success, otherwise return 0.  The caller
    must obstack_free the list after use.  */
 
 static struct mips_operand_token *
-mips_parse_arguments (char *s, char float_format)
+mips_parse_arguments (char *s, char format)
 {
   struct mips_operand_token token;
 
   SKIP_SPACE_TABS (s);
   while (*s)
     {
-      s = mips_parse_argument_token (s, float_format);
+      switch (format)
+	{
+	case 'p':
+	  s = mips_parse_vfpu_prefix_st (s);
+
+	case 'q':
+	  s = mips_parse_vfpu_prefix_d (s);
+
+	default:
+	  s = mips_parse_argument_token (s, format);
+	}
       if (!s)
 	{
 	  obstack_free (&mips_operand_tokens,
@@ -3334,7 +4161,15 @@ validate_mips_insn (const struct mips_opcode *opcode,
   used_bits = 0;
   opno = 0;
   if (opcode->pinfo2 & INSN2_VU0_CHANNEL_SUFFIX)
-    used_bits = mips_insert_operand (&mips_vu0_channel_mask, used_bits, -1);
+    {
+      used_bits = mips_insert_operand (&mips_vu0_channel_mask, used_bits, -1);
+    }
+  else if (opcode->pinfo2 & (INSN2_VFPU_SUFFIX_S | INSN2_VFPU_SUFFIX_P
+			     | INSN2_VFPU_SUFFIX_T | INSN2_VFPU_SUFFIX_Q))
+    {
+      used_bits = mips_insert_operand (&mips_vfpu_suffix_mask[0], used_bits, -1);
+      used_bits = mips_insert_operand (&mips_vfpu_suffix_mask[1], used_bits, -1);
+    }
   for (s = opcode->args; *s; ++s)
     switch (*s)
       {
@@ -3371,7 +4206,7 @@ validate_mips_insn (const struct mips_opcode *opcode,
 	      used_bits &= ~(mask & 0x700);
 	  }
 	/* Skip prefix characters.  */
-	if (decode_operand && (*s == '+' || *s == 'm' || *s == '-'))
+	if (decode_operand && (*s == '+' || *s == 'm' || *s == '-' || *s == '?'))
 	  ++s;
 	opno += 1;
 	break;
@@ -4864,6 +5699,20 @@ convert_reg_type (const struct mips_opcode *opcode,
     case OP_REG_VF:
       return RTYPE_NUM | RTYPE_VF;
 
+    case OP_REG_VFPU_SCALAR:
+    case OP_REG_VFPU_VECTOR_P:
+    case OP_REG_VFPU_VECTOR_T:
+    case OP_REG_VFPU_VECTOR_Q:
+    case OP_REG_VFPU_VECTOR_SUFFIX:
+    case OP_REG_VFPU_MATRIX_P:
+    case OP_REG_VFPU_MATRIX_T:
+    case OP_REG_VFPU_MATRIX_Q:
+    case OP_REG_VFPU_MATRIX_SUFFIX:
+      return RTYPE_VFPU_SCALAR | RTYPE_VFPU_VECTOR | RTYPE_VFPU_MATRIX;
+
+    case OP_REG_VFPU_CR:
+      return RTYPE_VFPU_CR;
+
     case OP_REG_R5900_I:
       return RTYPE_R5900_I;
 
@@ -4888,6 +5737,289 @@ convert_reg_type (const struct mips_opcode *opcode,
 /* ARG is register REGNO, of type TYPE.  Warn about any dubious registers.  */
 
 static void
+as_bad_vfpu_register(const char *message, unsigned int regno)
+{
+  char prefix;
+  unsigned int type, field, index, column, row, u;
+  bfd_boolean transpose;
+
+  type = regno & RTYPE_MASK;
+  field = (regno >> VFPU_REG_SH_FIELD) & VFPU_REG_MASK_FIELD;
+  index = (regno >> VFPU_REG_SH_INDEX) & VFPU_REG_MASK_INDEX;
+  if (type == RTYPE_VFPU_SCALAR)
+    {
+      prefix = 'S';
+      column = index;
+      row = field;
+    }
+  else
+    {
+      transpose = (field & 1) != 0;
+      u = field & 2;
+      if (regno & RTYPE_VFPU_TRIPLE)
+	{
+	  u >>= 1;
+	  if (regno & RTYPE_VFPU_HAS_REMAINDER)
+	    u |= 2;
+	}
+      else
+	{
+	  u |= 1;
+	}
+
+      if (transpose)
+	{
+	  column = u;
+	  row = index;
+	}
+      else
+	{
+	  column = index;
+	  row = u;
+	}
+
+      switch (type)
+	{
+	case RTYPE_VFPU_VECTOR:
+	  prefix = transpose ? 'R' : 'C';
+	  break;
+
+	case RTYPE_VFPU_MATRIX:
+	  prefix = transpose ? 'E' : 'M';
+	  break;
+
+	default:
+	  abort ();
+	}
+    }
+
+    as_bad ("%s (%c%d%d%d)", message, prefix, column, row);
+}
+
+enum check_regno_vfpu_dimension;
+  {
+    CHECK_REGNO_VFPU_DIMENSION_SCALAR,
+    CHECK_REGNO_VFPU_DIMENSION_VECTOR,
+    CHECK_REGNO_VFPU_DIMENSION_MATRIX
+  };
+
+enum check_regno_vfpu_width
+  {
+    CHECK_REGNO_VFPU_WIDTH_S,
+    CHECK_REGNO_VFPU_WIDTH_P,
+    CHECK_REGNO_VFPU_WIDTH_T,
+    CHECK_REGNO_VFPU_WIDTH_Q,
+    CHECK_REGNO_VFPU_WIDTH_SUFFIX
+  };
+
+static enum check_regno_vfpu_dimension
+check_regno_vfpu_dimension_get (unsigned int regno)
+{
+  if (regno & RTYPE_VFPU_SCALAR)
+    return CHECK_REGNO_VFPU_DIMENSION_SCALAR;
+  else if (regno & RTYPE_VFPU_VECTOR)
+    return CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+  else if (regno & RTYPE_VFPU_MATRIX)
+    return CHECK_REGNO_VFPU_DIMENSION_MATRIX;
+}
+
+static enum check_regno_vfpu_width
+check_regno_vfpu_width_get_by_suffix (unsigned int code)
+{
+  switch (code & ((1 << OP_SH_VFPUSUFFIX_HI) | (1 << OP_SH_VFPUSUFFIX_LO)))
+    {
+    case 0:
+      return CHECK_REGNO_VFPU_WIDTH_S;
+
+    case 1 << OP_SH_VFPUSUFFIX_LO:
+      return CHECK_REGNO_VFPU_WIDTH_P;
+
+    case 1 << OP_SH_VFPUSUFFIX_HI:
+      return CHECK_REGNO_VFPU_WIDTH_T;
+
+    case (1 << OP_SH_VFPUSUFFIX_HI) | (1 << OP_SH_VFPUSUFFIX_LO):
+      return CHECK_REGNO_VFPU_WIDTH_Q;
+    }
+}
+
+static void
+check_regno_vfpu_get_by_operand (enum mips_reg_operand_type type,
+				 enum check_regno_vfpu_dimension *dimension,
+				 enum check_regno_vfpu_width *width)
+{
+  switch (type)
+    {
+    case OP_REG_VFPU_VECTOR_P:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+      width = CHECK_REGNO_VFPU_WIDTH_P;
+      break;
+
+    case OP_REG_VFPU_VECTOR_T:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+      width = CHECK_REGNO_VFPU_WIDTH_T;
+      break;
+
+    case OP_REG_VFPU_VECTOR_Q:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+      width = CHECK_REGNO_VFPU_WIDTH_Q;
+      break;
+
+    case OP_REG_VFPU_VECTOR_SUFFIX:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+      width = CHECK_REGNO_VFPU_WIDTH_SUFFIX;
+      break;
+
+    case OP_REG_VFPU_MATRIX_P:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+      width = CHECK_REGNO_VFPU_WIDTH_P;
+      break;
+
+    case OP_REG_VFPU_MATRIX_T:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_VECTOR;
+      width = CHECK_REGNO_VFPU_WIDTH_T;
+      break;
+
+    case OP_REG_VFPU_MATRIX_Q:
+      dimension = CHECK_REGNO_VFPU_DIMENSION_MATRIX;
+      width = CHECK_REGNO_VFPU_WIDTH_Q;
+      break;
+
+    case OP_REG_VFPU_MATRIX:
+      dimension = CHECK_REGNO_VFPU_WIDTH_SUFFIX;
+      width = vfpu_get_reg_width_by_suffix (arg->insn->insn_opcode);
+      break;
+
+    default:
+      abort ();
+    }
+}
+
+static unsigned short
+check_regno_vfpu_check_used (enum check_regno_vfpu_dimension dimension,
+			     enum check_regno_vfpu_width width,
+			     unsigned int regno)
+{
+  static const unsigned short table_scalar[16] =
+    {
+      0x0001, 0x0010, 0x0100, 0x1000,
+      0x0002, 0x0020, 0x0200, 0x2000,
+      0x0004, 0x0040, 0x0400, 0x4000,
+      0x0008, 0x0080, 0x0800, 0x8000
+    };
+
+  static const unsigned short table_vector_p[16] =
+    {
+      0x0003, 0x0030, 0x0300, 0x3000,
+      0x0011, 0x0022, 0x0044, 0x0088,
+      0x000c, 0x00c0, 0x0c00, 0xc000,
+      0x1100, 0x2200, 0x4400, 0x8800
+    };
+
+  static const unsigned short table_vector_q[16] =
+    {
+      0x0007, 0x0070, 0x0700, 0x7000,
+      0x0111, 0x0222, 0x0444, 0x0888,
+      0x000e, 0x00e0, 0x0e00, 0xe000,
+      0x1110, 0x2220, 0x4440, 0x8880
+    };
+
+  static const unsigned short table_vector_q[16] =
+    {
+      0x000f, 0x00f0, 0x0f00, 0xf000,
+      0x1111, 0x2222, 0x4444, 0x8888,
+      0x000f, 0x00f0, 0x0f00, 0xf000,
+      0x1111, 0x2222, 0x4444, 0x8888
+    };
+
+  static const unsigned short table_matrix_p[16] =
+    {
+      0x0000, 0x0000, 0x0000, 0x0000,
+      0x0000, 0x0000, 0x0000, 0x0000,
+      0x0000, 0x0000, 0x0000, 0x0000,
+      0x0000, 0x0000, 0x0000, 0x0000
+    };
+
+  static const unsigned short table_matrix_t[16] =
+    {
+      0x0033, 0x0033, 0x3300, 0x3300,
+      0x0033, 0x0033, 0x00cc, 0x00cc,
+      0x00cc, 0x00cc, 0xcc00, 0xcc00,
+      0x3300, 0x3300, 0xcc00, 0xcc00
+    };
+
+  static const unsigned short table_matrix_q[16] =
+    {
+      0x0777, 0x7770, 0x0777, 0x7770,
+      0x0777, 0x0eee, 0x0777, 0x0eee,
+      0x0eee, 0xeee0, 0x0eee, 0xeee0,
+      0x7770, 0xeee0, 0x7770, 0xeee0
+    };
+
+  const unsigned short *table;
+
+  switch (width)
+    {
+    case CHECK_REGNO_VFPU_WIDTH_S:
+      table = table_scalar;
+      break;
+
+    case CHECK_REGNO_VFPU_WIDTH_P:
+      switch (dimension)
+	{
+	case CHECK_REGNO_VFPU_DIMENSION_VECTOR:
+	  table = table_vector_p;
+	  break;
+
+	case CHECK_REGNO_VFPU_DIMENSION_MATRIX:
+	  table = table_matrix_p;
+	  break;
+
+	default:
+	  abort ();
+	}
+      break;
+
+    case CHECK_REGNO_VFPU_WIDTH_T:
+      switch (dimension)
+	{
+	case CHECK_REGNO_VFPU_DIMENSION_VECTOR:
+	  table = table_vector_t;
+	  break;
+
+	case CHECK_REGNO_VFPU_DIMENSION_MATRIX:
+	  table = table_matrix_t;
+	  break;
+
+	default:
+	  abort ();
+	}
+      break;
+
+    case CHECK_REGNO_VFPU_WIDTH_Q:
+      switch (dimension)
+	{
+	case CHECK_REGNO_VFPU_DIMENSION_VECTOR:
+	  table = table_vector_q;
+	  break;
+
+	case CHECK_REGNO_VFPU_DIMENSION_MATRIX:
+	  table = table_matrix_q;
+	  break;
+
+	default:
+	  abort ();
+	}
+      break;
+
+    default:
+      abort ();
+    }
+
+  return table[(((regno >> VFPU_REG_SH_FIELD) & VFPU_REG_MASK_FIELD) << 2)
+	       + ((regno >> VFPU_REG_SH_INDEX) & VFPU_REG_MASK_INDEX)];
+}
+
+static void
 check_regno (struct mips_arg_info *arg,
 	     enum mips_reg_operand_type type, unsigned int regno)
 {
@@ -4896,6 +6028,7 @@ check_regno (struct mips_arg_info *arg,
 
   if (type == OP_REG_FP
       && (regno & 1) != 0
+      && !CPU_IS_ALLEGREX (mips_opts.arch)
       && !mips_oddfpreg_ok (arg->insn->insn_mo, arg->opnum))
     {
       /* This was a warning prior to introducing O32 FPXX and FP64 support
@@ -4924,6 +6057,115 @@ check_regno (struct mips_arg_info *arg,
 	  && (length >= 5 && strncmp (name + length - 5, "any4", 4) == 0))
 	as_warn (_("condition code register should be 0 or 4 for %s, was %d"),
 		 name, regno);
+    }
+  else if ((regno
+	    & (RTYPE_VFPU_SCALAR | RTYPE_VFPU_VECTOR | RTYPE_VFPU_MATRIX)))
+    {
+      enum check_regno_vfpu_dimension dimension;
+      enum check_regno_vfpu_width width;
+      unsigned int matrix;
+      unsigned int transpose;
+      unsigned short used;
+
+      if (regno & RTYPE_VFPU_HAS_REMAINDER)
+	{
+	  as_bad_vfpu_register (_("improper register number"), regno);
+	  return;
+	}
+
+      check_regno_vfpu_get_by_operand (type, &dimension, &width);
+      if (width == OP_REG_VFPU_VECTOR_SUFFIX)
+	{
+	  width = vfpu_get_reg_width_by_suffix (arg->insn->insn_opcode);
+	  if (width == CHECK_REGNO_VFPU_WIDTH_S)
+	    dimension = CHECK_REGNO_VFPU_DIMENSION_SCALAR;
+	}
+
+      switch (dimension)
+	{
+	case CHECK_REGNO_VFPU_DIMENSION_SCALAR:
+	  if (!(regno & RTYPE_VFPU_SCALAR))
+	    {
+	      as_bad_vfpu_register (_("scalar expected"), regno);
+	      return;
+	    }
+
+	  break;
+
+	case CHECK_REGNO_VFPU_DIMENSION_VECTOR:
+	  if (!(regno & RTYPE_VFPU_VECTOR))
+	    {
+	      as_bad_vfpu_register (_("vector expected"), regno);
+	      return;
+	    }
+
+	  break;
+
+	case CHECK_REGNO_VFPU_DIMENSION_MATRIX:
+	  if (!(regno & RTYPE_VFPU_MATRIX))
+	    {
+	      as_bad_vfpu_register (_("matrix expected"), regno);
+	      return;
+	    }
+
+	  break;
+
+	default:
+	  abort ();
+	}
+
+      switch (width)
+	{
+	case CHECK_REGNO_VFPU_WIDTH_P:
+	  if ((regno & RTYPE_VFPU_TRIPLE))
+	    as_bad_vfpu_register (_("improper register number"), regno);
+
+	  break;
+
+	case CHECK_REGNO_VFPU_WIDTH_T:
+	  if (!(regno & RTYPE_VFPU_TRIPLE) && (field & 2))
+	    as_bad_vfpu_register (_("improper register number"), regno);
+
+	  break;
+
+	case CHECK_REGNO_VFPU_WIDTH_Q:
+	  if ((field & 2) || index)
+	    as_bad_vfpu_register (_("improper register number"), regno);
+
+	  break;
+
+	default:
+	  abort ();
+	}
+
+      matrix = (regno >> VFPU_REG_SH_MATRIX) & VFPU_REG_MASK_MATRIX;
+      transpose = (regno >> VFPU_REG_SH_FIELD) & 1;
+      used = check_regno_vfpu_check_used (dimension, width, reginfo);
+
+      if (dimension != CHECK_REGNO_VFPU_DIMENSION_SCALAR
+	  && (arg->insn->insn_mo->pinfo2 & INSN2_VFPU_CONFLICT)
+	  && arg->dest_regno != ILLEGAL_REG)
+	{
+	  unsigned int dest_dimension;
+	  unsigned int dest_matrix;
+	  unsigned int dest_transpose;
+	  unsigned short dest_used;
+
+	  dest_dimension = check_regno_vfpu_dimension_get (arg->dest_regno);
+	  dest_width = check_regno_vfpu_width_get_by_suffix (arg->dest_regno);
+	  dest_matrix = (arg->dest_regno >> VFPU_REG_SH_MATRIX)
+			& VFPU_REG_MASK_MATRIX;
+	  dest_transpose = (arg->dest_regno >> VFPU_REG_SH_FIELD) & 1;
+	  dest_used = check_regno_vfpu_check_used (dest_dimension,
+						   dest_width,
+						   arg->dest_reginfo);
+
+	  if (dest_matrix == matrix && (dest_used & used)
+	      && (arg->insn->insn_mo->pinfo2 & INSN2_VFPU_CONFLICT_L
+		  || (dest_used ^ used) || (dest_transpose != transpose)))
+	    as_bad_vfpu_register (_("VFPU register conflict"),
+				  arg->dest_regno);
+	}
     }
 }
 
@@ -5956,6 +7198,293 @@ match_vu0_suffix_operand (struct mips_arg_info *arg,
   return TRUE;
 }
 
+static bfd_boolean
+match_vfpu_cond (struct mips_arg_info *arg, unsigned int *uval)
+{
+  offsetT value;
+
+  if (arg->token->type == OT_VFPU_COND)
+    {
+      *uval = arg->token->u.vfpu_cond;
+      ++arg->token;
+      return TRUE;
+    }
+  else if (match_const_int (arg, &value))
+    {
+      if (value < 0 || value >= 16)
+	return FALSE;
+
+      *uval = value;
+      return TRUE;
+    }
+  else
+    {
+      return FALSE;
+    }
+}
+
+/* OP_VFPU_COND matcher */
+
+static bfd_boolean
+match_vfpu_cond_operand (struct mips_arg_info *arg,
+			 const struct mips_operand *operand)
+{
+  unsigned int uval;
+
+  if (!match_vfpu_cond (arg, &uval))
+    return FALSE;
+
+  insn_insert_operand (arg->insn, operand, uval);
+  return TRUE;
+}
+
+/* OP_VFPU_COND_STRICT0 matcher */
+
+static bfd_boolean
+match_vfpu_cond_strict0_operand (struct mips_arg_info *arg,
+				  const struct mips_operand *operand)
+{
+  unsigned int uval;
+
+  if (!match_vfpu_cond (arg, &uval))
+    return FALSE;
+
+  if ((uval & 8))
+    as_bad (_("invalid VFPU condition oparetion"));
+
+  insn_insert_operand (arg->insn, operand, uval);
+  return TRUE;
+}
+
+/* OP_VFPU_COND_STRICT1 matcher */
+
+static bfd_boolean
+match_vfpu_cond_strict1_operand (struct mips_arg_info *arg,
+				  const struct mips_operand *operand)
+{
+  unsigned int uval;
+
+  if (!match_vfpu_cond (arg, &uval))
+    return FALSE;
+
+  if (cond != 0 && cond != 4)
+    as_bad (_("invalid VFPU condition oparetion"));
+
+  insn_insert_operand (arg->insn, operand, uval);
+  return TRUE;
+}
+
+/* OP_VFPU_CONST matcher */
+
+static bfd_boolean
+match_vfpu_const_operand (struct mips_arg_info *arg,
+			  const struct mips_operand *operand)
+{
+  offsetT value;
+
+  if (arg->token->type == OT_VFPU_CONST)
+    {
+      value = arg->token->u.vfpu_const;
+      ++arg->token;
+    }
+  else if (match_const_int (arg, &value))
+    {
+      if (value < 0 || value >= 20)
+	return FALSE;
+    }
+  else
+    {
+      return FALSE;
+    }
+
+  insn_insert_operand (arg->insn, operand, value);
+  return TRUE;
+}
+
+/* OP_VFPU_HFLOAT matcher */
+
+static bfd_boolean
+match_vfpu_hfloat_operand (struct mips_arg_info *arg,
+			   const struct mips_operand *operand)
+{
+  bfd_vma vma;
+  offsetT offset;
+  unsigned int uval;
+  bfd_boolean sign;
+  int exponent;
+  unsigned int fraction;
+
+  if (arg->token->type == OT_FLOAT)
+    {
+      /* convert an IEEE 754 binary32 to a binary16 */
+      vma = target_big_endian ?
+	      bfd_getb32 (arg->token->u.flt) :
+	      bfd_getl32 (arg->token->u.flt);
+
+      sign = vma >> 31;
+      exponent = (vma >> 23) & 0xf;
+      fraction = vma & 0x007fffff;
+
+      if (exponent == 255)
+	{
+	  exponent = 31;
+	  /* If the exponent is the maximum value and fraction is not 0,
+	     it means NaN. It shouldn't be rounded to 0 in the case. */
+	  fraction = fraction ? 1023 : 0;
+	}
+      else
+	{
+	  /* apply exponent bias */
+	  exponent += - 127 + 15;
+
+	  if (exponent >= 32)
+	    {
+	      /* (negative) infinity */
+	      exponent = 31;
+	      fraction = 0;
+	    }
+	  else
+	    {
+	      /* round */
+	      fraction = (fraction >> 13) + ((fraction >> 12) & 1);
+
+	      if (exponent <= 0)
+		{
+		  /* add the implicit one bit */
+		  fraction |= 1 << 10;
+
+		  /* round to 2 ** -14 */
+		  fraction = (fraction >> (-exponent + 1))
+			     + ((fraction >> (-exponent) & 1);
+
+		  /* subnormal number */
+		  exponent = 0;
+		}
+	    }
+
+	  uval = (sign << 15) | (exponent << 5) | fraction;
+	}
+
+      ++arg->token;
+    }
+  else if (match_const_int (arg, &offset))
+    {
+      if (offset < 0 || offset >= 1 << 16)
+	return FALSE;
+
+      uval = offset;
+    }
+  else
+    {
+      return FALSE;
+    }
+
+  insn_insert_operand (arg->insn, operand, value);
+  return TRUE;
+}
+
+static bfd_boolean
+match_vfpu_rot_operand (struct mips_arg_info *arg,
+			   const struct mips_operand *operand)
+{
+  unsigned int number;
+  offsetT code;
+
+  if (arg->token->type == OT_VFPU_ROT)
+    {
+      switch (arg->insn->insn_mo->pinfo2 & INSN2_VFPU_CONFLICT_MASK)
+	{
+	case INSN2_VFPU_CONFLICT_P:
+	  number = 2;
+	  break;
+
+	case INSN2_VFPU_CONFLICT_T:
+	  numbrer = 3;
+	  break;
+
+	case INSN2_VFPU_CONFLICT_Q:
+	  number = 4;
+	  break;
+
+	default:
+	  number = 0;
+	  break;
+	}
+
+      if (number != arg->token->u.vfpu_rot.number)
+	as_bad (_("the number of rotator elements doesn't match"));
+
+      code = arg->token->u.vfpu_rot.code;
+      ++arg->token;
+    }
+  else if (match_const_int (arg, &code))
+    {
+      if (code < 0 || code >= 1 << 5)
+	return FALSE;
+    }
+  else
+    {
+      return FALSE;
+    }
+
+  insn_insert_operand (arg->insn, operand, code);
+  return TRUE;
+}
+
+static bfd_boolean
+match_vfpu_rwb_operand (struct mips_arg_info *arg,
+			const struct mips_operand *operand)
+{
+  if (arg->token->type != OT_VFPU_RWB)
+    return FALSE;
+
+  insn_insert_operand (arg->insn, operand, arg->token->u.vfpu_rwb);
+  return TRUE;
+}
+
+static bfd_boolean
+match_vfpu_prefix_operand (struct mips_arg_info *arg,
+			      const struct mips_operand *operand,
+			      bfd_boolean destination)
+{
+  unsigned int code;
+
+  if (arg->token->type != OT_VFPU_PREFIX)
+    return FALSE;
+
+  code = arg->token->u.vfpu_prefix.code;
+
+  if (destination)
+    {
+      if (!arg->token->u.vfpu_prefix.destination)
+	{
+	  if (((code >> VFPU_PREFIX_ST_SH_ABS) & VFPU_PREFIX_ST_MASK_ABS))
+	    as_bad (_("modulus operator `|' is invalid for destination"));
+
+	  if (((code >> VFPU_PREFIX_ST_SH_CONST) & VFPU_PREFIX_ST_MASK_CONST))
+	    as_bad (_("constant values are invalid for destination"));
+
+	  if (((code >> VFPU_ROT_SH_NEGATE) & VFPU_ROT_MASK_NEGATE))
+	    as_bad (_("sign inversion operator `-' are invalid for destination"));
+
+	  for (index = 0; index < 4; index++)
+	    {
+	      if (code >> (VFPU_PREFIX_ST_SH_CONST + index)
+		  && ((code >> (index * 2)) & 3) != index)
+		as_bad (_("different variables are invalid for destination"));
+	    }
+	}
+    }
+  else
+    {
+      if (arg->token->u.vfpu_prefix.destination)
+	as_bad (_("saturator `[C:D]' and mask `m' are valid only for destination"));
+    }
+
+  insn_insert_operand (arg->insn, operand, code);
+  return TRUE;
+}
+
 /* S is the text seen for ARG.  Match it against OPERAND.  Return the end
    of the argument text if the match is successful, otherwise return null.  */
 
@@ -6019,6 +7548,33 @@ match_operand (struct mips_arg_info *arg,
 
     case OP_VU0_MATCH_SUFFIX:
       return match_vu0_suffix_operand (arg, operand, TRUE);
+
+    case OP_VFPU_COND:
+      return match_vfpu_cond_operand (arg, operand);
+
+    case OP_VFPU_COND_STRICT0:
+      return match_vfpu_cond_strict0_operand (arg, operand);
+
+    case OP_VFPU_COND_STRICT1:
+      return match_vfpu_cond_strict1_operand (arg, operand);
+
+    case OP_VFPU_CONST:
+      return match_vfpu_const_operand (arg, operand);
+
+    case OP_VFPU_HFLOAT:
+      return match_vfpu_hfloat_operand (arg, operand);
+
+    case OP_VFPU_ROT:
+      return match_vfpu_rot_operand (arg, operand);
+
+    case OP_VFPU_RWB:
+      return match_vfpu_rwb_operand (arg, operand);
+
+    case OP_VFPU_PREFIX_ST:
+      return match_vfpu_prefix_operand (arg, operand, false);
+
+    case OP_VFPU_PREFIX_D:
+      return match_vfpu_prefix_operand (arg, operand, true);
 
     case OP_IMM_INDEX:
       return match_imm_index_operand (arg, operand);
@@ -7716,6 +9272,10 @@ match_insn (struct mips_cl_insn *insn, const struct mips_opcode *opcode,
   /* When no opcode suffix is specified, assume ".xyzw". */
   if ((opcode->pinfo2 & INSN2_VU0_CHANNEL_SUFFIX) != 0 && opcode_extra == 0)
     insn->insn_opcode |= 0xf << mips_vu0_channel_mask.lsb;
+  else if (opcode->pinfo2 & (INSN2_VFPU_SUFFIX_S | INSN2_VFPU_SUFFIX_P
+			      | INSN2_VFPU_SUFFIX_T | INSN2_VFPU_SUFFIX_Q) != 0
+	    && opcode_extra == 0)
+      set_insn_error (0, _("VFPU instruction suffix is not specified"));
   else
     insn->insn_opcode |= opcode_extra;
   memset (&arg, 0, sizeof (arg));
@@ -7924,7 +9484,7 @@ match_insn (struct mips_cl_insn *insn, const struct mips_opcode *opcode,
 	abort ();
 
       /* Skip prefixes.  */
-      if (*args == '+' || *args == 'm' || *args == '-')
+      if (*args == '+' || *args == 'm' || *args == '-' || *args == '?')
 	args++;
 
       if (mips_optional_operand_p (operand)
@@ -8436,7 +9996,8 @@ macro_read_relocs (va_list *args, bfd_reloc_code_real_type *r)
    string, and corresponding arguments.  */
 
 static void
-macro_build (expressionS *ep, const char *name, const char *fmt, ...)
+macro_build_extra (expressionS *ep, unsigned int opcode_extra,
+	     const char *name, const char *fmt, ...)
 {
   const struct mips_opcode *mo = NULL;
   bfd_reloc_code_real_type r[3];
@@ -8451,7 +10012,7 @@ macro_build (expressionS *ep, const char *name, const char *fmt, ...)
 
   if (mips_opts.mips16)
     {
-      mips16_macro_build (ep, name, fmt, &args);
+      mips16_macro_build_extra (ep, opcode_extra, name, fmt, &args);
       va_end (args);
       return;
     }
@@ -8495,6 +10056,9 @@ macro_build (expressionS *ep, const char *name, const char *fmt, ...)
 
   gas_assert (mo);
   create_insn (&insn, mo);
+
+  insn.insn_opcode |= opcode_extra;
+
   for (; *fmt; ++fmt)
     {
       switch (*fmt)
@@ -8578,7 +10142,7 @@ macro_build (expressionS *ep, const char *name, const char *fmt, ...)
 	    uval |= (uval << 5);
 	  insn_insert_operand (&insn, operand, uval);
 
-	  if (*fmt == '+' || *fmt == 'm' || *fmt == '-')
+	  if (*fmt == '+' || *fmt == 'm' || *fmt == '-' || *fmt == '?')
 	    ++fmt;
 	  break;
 	}
@@ -8589,9 +10153,18 @@ macro_build (expressionS *ep, const char *name, const char *fmt, ...)
   append_insn (&insn, ep, r, TRUE);
 }
 
+/* This function doesn't allow to set OPCODE_EXTRA. Any macros
+   without instruction suffixes should be built with this function. */
+
 static void
-mips16_macro_build (expressionS *ep, const char *name, const char *fmt,
-		    va_list *args)
+macro_build (expressionS *ep, const char *name, const char *fmt, ...)
+{
+  macro_build_extra (ep, 0, name, fmt);
+}
+
+static void
+mips16_macro_build_extra (expressionS *ep, unsigned int opcode_extra,
+			  const char *name, const char *fmt, va_list *args)
 {
   struct mips_opcode *mo;
   struct mips_cl_insn insn;
@@ -8770,6 +10343,179 @@ macro_build_ldst_constoffset (expressionS *ep, const char *op,
 
       if (!mips_opts.at)
 	as_bad (_("macro used $at after \".set noat\""));
+    }
+}
+
+static void
+macro_build_vfpu (const char *op, const struct mips_operand_array *operands,
+		const unsigned int *operands, unsigned opcode_extra)
+{
+  char fmt[16];
+  char *cursor;
+  unsigned int index;
+
+  cursor = fmt;
+  for (index = 0; index < MAX_OPERANDS; index++)
+    {
+      if (operands->operand[index] == NULL)
+	continue;
+
+      switch (operands->operand[index]->type)
+	{
+	case OP_REG_VFPU_SCALAR:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = '!';
+	      break;
+
+	    case 16:
+	      *cursor++ = '#';
+	      break;
+
+	    case 0:
+	      *cursor++ = '$';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+
+	case OP_REG_VFPU_VECTOR_P:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = '%';
+	      break;
+
+	    case 16:
+	      *cursor++ = '&';
+	      break;
+
+	    case 0:
+	      *cursor++ = '(';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+
+	case OP_REG_VFPU_VECTOR_T:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = ')';
+	      break;
+
+	    case 16:
+	      *cursor++ = '*';
+	      break;
+
+	    case 0:
+	      *cursor++ = '+';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+
+	case OP_REG_VFPU_VECTOR_Q:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = ',';
+	      break;
+
+	    case 16:
+	      *cursor++ = '-';
+	      break;
+
+	    case 0:
+	      *cursor++ = '.';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+
+	case OP_REG_VFPU_VECTOR_P:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = '/';
+	      break;
+
+	    case 16:
+	      *cursor++ = '0';
+	      break;
+
+	    case 0:
+	      *cursor++ = '1';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+
+	case OP_REG_VFPU_VECTOR_T:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = '2';
+	      break;
+
+	    case 16:
+	      *cursor++ = '3';
+	      break;
+
+	    case 0:
+	      *cursor++ = '4';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+
+	case OP_REG_VFPU_VECTOR_Q:
+	  *cursor++ = '?';
+	  switch (operands->operand[index]->lsb)
+	    {
+	    case 8:
+	      *cursor++ = '5';
+	      break;
+
+	    case 16:
+	      *cursor++ = '6';
+	      break;
+
+	    case 0:
+	      *cursor++ = '7';
+	      break;
+
+	    default:
+	      abort ();
+	      break;
+	    }
+	  break;
+	}
     }
 }
 
@@ -9682,6 +11428,398 @@ small_offset_p (unsigned int range, unsigned int align, unsigned int offbits)
   return FALSE;
 }
 
+static void
+macro_ld ()
+{
+  breg = op[2];
+  if (small_offset_p (0, align, 16))
+    {
+      /* The first case exists for M_LD_AB and M_SD_AB, which are
+	  macros for o32 but which should act like normal instructions
+	  otherwise.  */
+      if (offbits == 16)
+	macro_build (&offset_expr, s, fmt, op[0], -1, offset_reloc[0],
+		      offset_reloc[1], offset_reloc[2], breg);
+      else if (small_offset_p (0, align, offbits))
+	{
+	  if (offbits == 0)
+	    macro_build (NULL, s, fmt, op[0], breg);
+	  else
+	    macro_build (NULL, s, fmt, op[0],
+			 (int) offset_expr.X_add_number, breg);
+	}
+      else
+	{
+	  if (tempreg == AT)
+	    used_at = 1;
+	  macro_build (&offset_expr, ADDRESS_ADDI_INSN, "t,r,j",
+		       tempreg, breg, -1, offset_reloc[0],
+		       offset_reloc[1], offset_reloc[2]);
+	  if (offbits == 0)
+	    macro_build (NULL, s, fmt, op[0], tempreg);
+	  else
+	    macro_build (NULL, s, fmt, op[0], 0, tempreg);
+	}
+      return;
+    }
+
+  if (tempreg == AT)
+    used_at = 1;
+
+  if (offset_expr.X_op != O_constant
+      && offset_expr.X_op != O_symbol)
+    {
+      as_bad (_("expression too complex"));
+      offset_expr.X_op = O_constant;
+    }
+
+  if (HAVE_32BIT_ADDRESSES
+      && !IS_SEXT_32BIT_NUM (offset_expr.X_add_number))
+    {
+      char value [32];
+
+      sprintf_vma (value, offset_expr.X_add_number);
+      as_bad (_("number (0x%s) larger than 32 bits"), value);
+    }
+
+  /* A constant expression in PIC code can be handled just as it
+     is in non PIC code.  */
+  if (offset_expr.X_op == O_constant)
+    {
+      expr1.X_add_number = offset_high_part (offset_expr.X_add_number,
+					     offbits == 0 ? 16 : offbits);
+      offset_expr.X_add_number -= expr1.X_add_number;
+
+      load_register (tempreg, &expr1, HAVE_64BIT_ADDRESSES);
+      if (breg != 0)
+	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+		     tempreg, tempreg, breg);
+      if (offbits == 0)
+	{
+	  if (offset_expr.X_add_number != 0)
+	    macro_build (&offset_expr, ADDRESS_ADDI_INSN,
+			 "t,r,j", tempreg, tempreg, BFD_RELOC_LO16);
+	  macro_build (NULL, s, fmt, op[0], tempreg);
+	}
+      else if (offbits == 16)
+	macro_build (&offset_expr, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
+      else
+	macro_build (NULL, s, fmt, op[0],
+		     (int) offset_expr.X_add_number, tempreg);
+    }
+  else if (offbits != 16)
+    {
+      /* The offset field is too narrow to be used for a low-part
+	 relocation, so load the whole address into the auxillary
+	 register.  */
+      load_address (tempreg, &offset_expr, &used_at);
+      if (breg != 0)
+	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		 tempreg, tempreg, breg);
+      if (offbits == 0)
+	macro_build (NULL, s, fmt, op[0], tempreg);
+      else
+	macro_build (NULL, s, fmt, op[0], 0, tempreg);
+    }
+  else if (mips_pic == NO_PIC)
+    {
+      /* If this is a reference to a GP relative symbol, and there
+	 is no base register, we want
+	   <op>	op[0],<sym>($gp)	(BFD_RELOC_GPREL16)
+	 Otherwise, if there is no base register, we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_HI16_S)
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
+	 If we have a constant, we need two instructions anyhow,
+	 so we always use the latter form.
+
+	 If we have a base register, and this is a reference to a
+	 GP relative symbol, we want
+	   addu	$tempreg,$breg,$gp
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_GPREL16)
+	 Otherwise we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_HI16_S)
+	   addu	$tempreg,$tempreg,$breg
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
+	 With a constant we always use the latter case.
+
+	 With 64bit address space and no base register and $at usable,
+	 we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
+	   lui	$at,<sym>		(BFD_RELOC_HI16_S)
+	   daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
+	   dsll32	$tempreg,0
+	   daddu	$tempreg,$at
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
+	 If we have a base register, we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
+	   lui	$at,<sym>		(BFD_RELOC_HI16_S)
+	   daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
+	   daddu	$at,$breg
+	   dsll32	$tempreg,0
+	   daddu	$tempreg,$at
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
+
+	 Without $at we can't generate the optimal path for superscalar
+	 processors here since this would require two temporary registers.
+	   lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
+	   daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
+	   dsll	$tempreg,16
+	   daddiu	$tempreg,<sym>		(BFD_RELOC_HI16_S)
+	   dsll	$tempreg,16
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
+	 If we have a base register, we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
+	   daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
+	   dsll	$tempreg,16
+	   daddiu	$tempreg,<sym>		(BFD_RELOC_HI16_S)
+	   dsll	$tempreg,16
+	   daddu	$tempreg,$tempreg,$breg
+	   <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
+
+	 For GP relative symbols in 64bit address space we can use
+	 the same sequence as in 32bit address space.  */
+      if (HAVE_64BIT_SYMBOLS)
+	{
+	  if ((valueT) offset_expr.X_add_number <= MAX_GPREL_OFFSET
+    	  && !nopic_need_relax (offset_expr.X_add_symbol, 1))
+    	{
+    	  relax_start (offset_expr.X_add_symbol);
+    	  if (breg == 0)
+    	    {
+    	      macro_build (&offset_expr, s, fmt, op[0],
+    			   BFD_RELOC_GPREL16, mips_gp_register);
+    	    }
+    	  else
+    	    {
+    	      macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    			   tempreg, breg, mips_gp_register);
+    	      macro_build (&offset_expr, s, fmt, op[0],
+    			   BFD_RELOC_GPREL16, tempreg);
+    	    }
+    	  relax_switch ();
+    	}
+
+	  if (used_at == 0 && mips_opts.at)
+    	{
+    	  macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
+    		       BFD_RELOC_MIPS_HIGHEST);
+    	  macro_build (&offset_expr, "lui", LUI_FMT, AT,
+    		       BFD_RELOC_HI16_S);
+    	  macro_build (&offset_expr, "daddiu", "t,r,j", tempreg,
+    		       tempreg, BFD_RELOC_MIPS_HIGHER);
+    	  if (breg != 0)
+    	    macro_build (NULL, "daddu", "d,v,t", AT, AT, breg);
+    	  macro_build (NULL, "dsll32", SHFT_FMT, tempreg, tempreg, 0);
+    	  macro_build (NULL, "daddu", "d,v,t", tempreg, tempreg, AT);
+    	  macro_build (&offset_expr, s, fmt, op[0], BFD_RELOC_LO16,
+    		       tempreg);
+    	  used_at = 1;
+    	}
+	  else
+    	{
+    	  macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
+    		       BFD_RELOC_MIPS_HIGHEST);
+    	  macro_build (&offset_expr, "daddiu", "t,r,j", tempreg,
+    		       tempreg, BFD_RELOC_MIPS_HIGHER);
+    	  macro_build (NULL, "dsll", SHFT_FMT, tempreg, tempreg, 16);
+    	  macro_build (&offset_expr, "daddiu", "t,r,j", tempreg,
+    		       tempreg, BFD_RELOC_HI16_S);
+    	  macro_build (NULL, "dsll", SHFT_FMT, tempreg, tempreg, 16);
+    	  if (breg != 0)
+    	    macro_build (NULL, "daddu", "d,v,t",
+    			 tempreg, tempreg, breg);
+    	  macro_build (&offset_expr, s, fmt, op[0],
+    		       BFD_RELOC_LO16, tempreg);
+    	}
+
+	  if (mips_relax.sequence)
+    	relax_end ();
+	  break;
+	}
+
+      if (breg == 0)
+	{
+	  if ((valueT) offset_expr.X_add_number <= MAX_GPREL_OFFSET
+    	  && !nopic_need_relax (offset_expr.X_add_symbol, 1))
+    	{
+    	  relax_start (offset_expr.X_add_symbol);
+    	  macro_build (&offset_expr, s, fmt, op[0], BFD_RELOC_GPREL16,
+    		       mips_gp_register);
+    	  relax_switch ();
+    	}
+	  macro_build_lui (&offset_expr, tempreg);
+	  macro_build (&offset_expr, s, fmt, op[0],
+    		   BFD_RELOC_LO16, tempreg);
+	  if (mips_relax.sequence)
+    	relax_end ();
+	}
+      else
+	{
+	  if ((valueT) offset_expr.X_add_number <= MAX_GPREL_OFFSET
+    	  && !nopic_need_relax (offset_expr.X_add_symbol, 1))
+    	{
+    	  relax_start (offset_expr.X_add_symbol);
+    	  macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		       tempreg, breg, mips_gp_register);
+    	  macro_build (&offset_expr, s, fmt, op[0],
+    		       BFD_RELOC_GPREL16, tempreg);
+    	  relax_switch ();
+    	}
+	  macro_build_lui (&offset_expr, tempreg);
+	  macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		   tempreg, tempreg, breg);
+	  macro_build (&offset_expr, s, fmt, op[0],
+    		   BFD_RELOC_LO16, tempreg);
+	  if (mips_relax.sequence)
+    	relax_end ();
+	}
+    }
+  else if (!mips_big_got)
+    {
+      int lw_reloc_type = (int) BFD_RELOC_MIPS_GOT16;
+
+      /* If this is a reference to an external symbol, we want
+	   lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT16)
+	   nop
+	   <op>	op[0],0($tempreg)
+	 Otherwise we want
+	   lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT16)
+	   nop
+	   addiu	$tempreg,$tempreg,<sym>	(BFD_RELOC_LO16)
+	   <op>	op[0],0($tempreg)
+
+	 For NewABI, we want
+	   lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT_PAGE)
+	   <op>	op[0],<sym>($tempreg)   (BFD_RELOC_MIPS_GOT_OFST)
+
+	 If there is a base register, we add it to $tempreg before
+	 the <op>.  If there is a constant, we stick it in the
+	 <op> instruction.  We don't handle constants larger than
+	 16 bits, because we have no way to load the upper 16 bits
+	 (actually, we could handle them for the subset of cases
+	 in which we are not using $at).  */
+      gas_assert (offset_expr.X_op == O_symbol);
+      if (HAVE_NEWABI)
+	{
+	  macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
+    		   BFD_RELOC_MIPS_GOT_PAGE, mips_gp_register);
+	  if (breg != 0)
+    	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		     tempreg, tempreg, breg);
+	  macro_build (&offset_expr, s, fmt, op[0],
+    		   BFD_RELOC_MIPS_GOT_OFST, tempreg);
+	  break;
+	}
+      expr1.X_add_number = offset_expr.X_add_number;
+      offset_expr.X_add_number = 0;
+      if (expr1.X_add_number < -0x8000
+	  || expr1.X_add_number >= 0x8000)
+	as_bad (_("PIC code offset overflow (max 16 signed bits)"));
+      macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
+    	       lw_reloc_type, mips_gp_register);
+      load_delay_nop ();
+      relax_start (offset_expr.X_add_symbol);
+      relax_switch ();
+      macro_build (&offset_expr, ADDRESS_ADDI_INSN, "t,r,j", tempreg,
+    	       tempreg, BFD_RELOC_LO16);
+      relax_end ();
+      if (breg != 0)
+	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		 tempreg, tempreg, breg);
+      macro_build (&expr1, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
+    }
+  else if (mips_big_got && !HAVE_NEWABI)
+    {
+      int gpdelay;
+
+      /* If this is a reference to an external symbol, we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_MIPS_GOT_HI16)
+	   addu	$tempreg,$tempreg,$gp
+	   lw	$tempreg,<sym>($tempreg) (BFD_RELOC_MIPS_GOT_LO16)
+	   <op>	op[0],0($tempreg)
+	 Otherwise we want
+	   lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT16)
+	   nop
+	   addiu	$tempreg,$tempreg,<sym>	(BFD_RELOC_LO16)
+	   <op>	op[0],0($tempreg)
+	 If there is a base register, we add it to $tempreg before
+	 the <op>.  If there is a constant, we stick it in the
+	 <op> instruction.  We don't handle constants larger than
+	 16 bits, because we have no way to load the upper 16 bits
+	 (actually, we could handle them for the subset of cases
+	 in which we are not using $at).  */
+      gas_assert (offset_expr.X_op == O_symbol);
+      expr1.X_add_number = offset_expr.X_add_number;
+      offset_expr.X_add_number = 0;
+      if (expr1.X_add_number < -0x8000
+	  || expr1.X_add_number >= 0x8000)
+	as_bad (_("PIC code offset overflow (max 16 signed bits)"));
+      gpdelay = reg_needs_delay (mips_gp_register);
+      relax_start (offset_expr.X_add_symbol);
+      macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
+    	       BFD_RELOC_MIPS_GOT_HI16);
+      macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t", tempreg, tempreg,
+    	       mips_gp_register);
+      macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
+    	       BFD_RELOC_MIPS_GOT_LO16, tempreg);
+      relax_switch ();
+      if (gpdelay)
+	macro_build (NULL, "nop", "");
+      macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
+    	       BFD_RELOC_MIPS_GOT16, mips_gp_register);
+      load_delay_nop ();
+      macro_build (&offset_expr, ADDRESS_ADDI_INSN, "t,r,j", tempreg,
+    	       tempreg, BFD_RELOC_LO16);
+      relax_end ();
+
+      if (breg != 0)
+	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		 tempreg, tempreg, breg);
+      macro_build (&expr1, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
+    }
+  else if (mips_big_got && HAVE_NEWABI)
+    {
+      /* If this is a reference to an external symbol, we want
+	   lui	$tempreg,<sym>		(BFD_RELOC_MIPS_GOT_HI16)
+	   add	$tempreg,$tempreg,$gp
+	   lw	$tempreg,<sym>($tempreg) (BFD_RELOC_MIPS_GOT_LO16)
+	   <op>	op[0],<ofst>($tempreg)
+	 Otherwise, for local symbols, we want:
+	   lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT_PAGE)
+	   <op>	op[0],<sym>($tempreg)   (BFD_RELOC_MIPS_GOT_OFST)  */
+      gas_assert (offset_expr.X_op == O_symbol);
+      expr1.X_add_number = offset_expr.X_add_number;
+      offset_expr.X_add_number = 0;
+      if (expr1.X_add_number < -0x8000
+	  || expr1.X_add_number >= 0x8000)
+	as_bad (_("PIC code offset overflow (max 16 signed bits)"));
+      relax_start (offset_expr.X_add_symbol);
+      macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
+    	       BFD_RELOC_MIPS_GOT_HI16);
+      macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t", tempreg, tempreg,
+    	       mips_gp_register);
+      macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
+    	       BFD_RELOC_MIPS_GOT_LO16, tempreg);
+      if (breg != 0)
+	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		 tempreg, tempreg, breg);
+      macro_build (&expr1, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
+
+      relax_switch ();
+      offset_expr.X_add_number = expr1.X_add_number;
+      macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
+    	       BFD_RELOC_MIPS_GOT_PAGE, mips_gp_register);
+      if (breg != 0)
+	macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
+    		 tempreg, tempreg, breg);
+      macro_build (&offset_expr, s, fmt, op[0],
+    	       BFD_RELOC_MIPS_GOT_OFST, tempreg);
+      relax_end ();
+    }
+  else
+    abort ();
+}
+
 /*
  *			Build macros
  *   This routine implements the seemingly endless macro or synthesized
@@ -9728,6 +11866,7 @@ macro (struct mips_cl_insn *ip, char *str)
   int hold_mips_optimize;
   unsigned int align;
   unsigned int op[MAX_OPERANDS];
+  unsigned int op_extra;
 
   gas_assert (! mips_opts.mips16);
 
@@ -9737,6 +11876,14 @@ macro (struct mips_cl_insn *ip, char *str)
       op[i] = insn_extract_operand (ip, operands->operand[i]);
     else
       op[i] = -1;
+
+  if (ip->insn_mo->pinfo2 & (INSN2_VFPU_SUFFIX_S | INSN2_VFPU_SUFFIX_P
+			     | INSN2_VFPU_SUFFIX_T | INSN2_VFPU_SUFFIX_Q))
+    op_extra = insn->insn_opcode
+		     & (OP_MASK_VFPUSUFFIX_LO << OP_SH_VFPUSUFFIX_LO)
+		     & (OP_MASK_VFPUSUFFIX_HI << OP_SH_VFPUSUFFIX_HI);
+  else
+    op_extra = 0;
 
   mask = ip->insn_mo->mask;
 
@@ -11620,393 +13767,7 @@ macro (struct mips_cl_insn *ip, char *str)
     ld_st:
       tempreg = AT;
     ld_noat:
-      breg = op[2];
-      if (small_offset_p (0, align, 16))
-	{
-	  /* The first case exists for M_LD_AB and M_SD_AB, which are
-	     macros for o32 but which should act like normal instructions
-	     otherwise.  */
-	  if (offbits == 16)
-	    macro_build (&offset_expr, s, fmt, op[0], -1, offset_reloc[0],
-			 offset_reloc[1], offset_reloc[2], breg);
-	  else if (small_offset_p (0, align, offbits))
-	    {
-	      if (offbits == 0)
-		macro_build (NULL, s, fmt, op[0], breg);
-	      else
-		macro_build (NULL, s, fmt, op[0],
-			     (int) offset_expr.X_add_number, breg);
-	    }
-	  else
-	    {
-	      if (tempreg == AT)
-		used_at = 1;
-	      macro_build (&offset_expr, ADDRESS_ADDI_INSN, "t,r,j",
-			   tempreg, breg, -1, offset_reloc[0],
-			   offset_reloc[1], offset_reloc[2]);
-	      if (offbits == 0)
-		macro_build (NULL, s, fmt, op[0], tempreg);
-	      else
-		macro_build (NULL, s, fmt, op[0], 0, tempreg);
-	    }
-	  break;
-	}
-
-      if (tempreg == AT)
-	used_at = 1;
-
-      if (offset_expr.X_op != O_constant
-	  && offset_expr.X_op != O_symbol)
-	{
-	  as_bad (_("expression too complex"));
-	  offset_expr.X_op = O_constant;
-	}
-
-      if (HAVE_32BIT_ADDRESSES
-	  && !IS_SEXT_32BIT_NUM (offset_expr.X_add_number))
-	{
-	  char value [32];
-
-	  sprintf_vma (value, offset_expr.X_add_number);
-	  as_bad (_("number (0x%s) larger than 32 bits"), value);
-	}
-
-      /* A constant expression in PIC code can be handled just as it
-	 is in non PIC code.  */
-      if (offset_expr.X_op == O_constant)
-	{
-	  expr1.X_add_number = offset_high_part (offset_expr.X_add_number,
-						 offbits == 0 ? 16 : offbits);
-	  offset_expr.X_add_number -= expr1.X_add_number;
-
-	  load_register (tempreg, &expr1, HAVE_64BIT_ADDRESSES);
-	  if (breg != 0)
-	    macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			 tempreg, tempreg, breg);
-	  if (offbits == 0)
-	    {
-	      if (offset_expr.X_add_number != 0)
-		macro_build (&offset_expr, ADDRESS_ADDI_INSN,
-			     "t,r,j", tempreg, tempreg, BFD_RELOC_LO16);
-	      macro_build (NULL, s, fmt, op[0], tempreg);
-	    }
-	  else if (offbits == 16)
-	    macro_build (&offset_expr, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
-	  else
-	    macro_build (NULL, s, fmt, op[0],
-			 (int) offset_expr.X_add_number, tempreg);
-	}
-      else if (offbits != 16)
-	{
-	  /* The offset field is too narrow to be used for a low-part
-	     relocation, so load the whole address into the auxillary
-	     register.  */
-	  load_address (tempreg, &offset_expr, &used_at);
-	  if (breg != 0)
-	    macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			 tempreg, tempreg, breg);
-	  if (offbits == 0)
-	    macro_build (NULL, s, fmt, op[0], tempreg);
-	  else
-	    macro_build (NULL, s, fmt, op[0], 0, tempreg);
-	}
-      else if (mips_pic == NO_PIC)
-	{
-	  /* If this is a reference to a GP relative symbol, and there
-	     is no base register, we want
-	       <op>	op[0],<sym>($gp)	(BFD_RELOC_GPREL16)
-	     Otherwise, if there is no base register, we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_HI16_S)
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
-	     If we have a constant, we need two instructions anyhow,
-	     so we always use the latter form.
-
-	     If we have a base register, and this is a reference to a
-	     GP relative symbol, we want
-	       addu	$tempreg,$breg,$gp
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_GPREL16)
-	     Otherwise we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_HI16_S)
-	       addu	$tempreg,$tempreg,$breg
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
-	     With a constant we always use the latter case.
-
-	     With 64bit address space and no base register and $at usable,
-	     we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
-	       lui	$at,<sym>		(BFD_RELOC_HI16_S)
-	       daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
-	       dsll32	$tempreg,0
-	       daddu	$tempreg,$at
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
-	     If we have a base register, we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
-	       lui	$at,<sym>		(BFD_RELOC_HI16_S)
-	       daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
-	       daddu	$at,$breg
-	       dsll32	$tempreg,0
-	       daddu	$tempreg,$at
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
-
-	     Without $at we can't generate the optimal path for superscalar
-	     processors here since this would require two temporary registers.
-	       lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
-	       daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
-	       dsll	$tempreg,16
-	       daddiu	$tempreg,<sym>		(BFD_RELOC_HI16_S)
-	       dsll	$tempreg,16
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
-	     If we have a base register, we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHEST)
-	       daddiu	$tempreg,<sym>		(BFD_RELOC_MIPS_HIGHER)
-	       dsll	$tempreg,16
-	       daddiu	$tempreg,<sym>		(BFD_RELOC_HI16_S)
-	       dsll	$tempreg,16
-	       daddu	$tempreg,$tempreg,$breg
-	       <op>	op[0],<sym>($tempreg)	(BFD_RELOC_LO16)
-
-	     For GP relative symbols in 64bit address space we can use
-	     the same sequence as in 32bit address space.  */
-	  if (HAVE_64BIT_SYMBOLS)
-	    {
-	      if ((valueT) offset_expr.X_add_number <= MAX_GPREL_OFFSET
-		  && !nopic_need_relax (offset_expr.X_add_symbol, 1))
-		{
-		  relax_start (offset_expr.X_add_symbol);
-		  if (breg == 0)
-		    {
-		      macro_build (&offset_expr, s, fmt, op[0],
-				   BFD_RELOC_GPREL16, mips_gp_register);
-		    }
-		  else
-		    {
-		      macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-				   tempreg, breg, mips_gp_register);
-		      macro_build (&offset_expr, s, fmt, op[0],
-				   BFD_RELOC_GPREL16, tempreg);
-		    }
-		  relax_switch ();
-		}
-
-	      if (used_at == 0 && mips_opts.at)
-		{
-		  macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
-			       BFD_RELOC_MIPS_HIGHEST);
-		  macro_build (&offset_expr, "lui", LUI_FMT, AT,
-			       BFD_RELOC_HI16_S);
-		  macro_build (&offset_expr, "daddiu", "t,r,j", tempreg,
-			       tempreg, BFD_RELOC_MIPS_HIGHER);
-		  if (breg != 0)
-		    macro_build (NULL, "daddu", "d,v,t", AT, AT, breg);
-		  macro_build (NULL, "dsll32", SHFT_FMT, tempreg, tempreg, 0);
-		  macro_build (NULL, "daddu", "d,v,t", tempreg, tempreg, AT);
-		  macro_build (&offset_expr, s, fmt, op[0], BFD_RELOC_LO16,
-			       tempreg);
-		  used_at = 1;
-		}
-	      else
-		{
-		  macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
-			       BFD_RELOC_MIPS_HIGHEST);
-		  macro_build (&offset_expr, "daddiu", "t,r,j", tempreg,
-			       tempreg, BFD_RELOC_MIPS_HIGHER);
-		  macro_build (NULL, "dsll", SHFT_FMT, tempreg, tempreg, 16);
-		  macro_build (&offset_expr, "daddiu", "t,r,j", tempreg,
-			       tempreg, BFD_RELOC_HI16_S);
-		  macro_build (NULL, "dsll", SHFT_FMT, tempreg, tempreg, 16);
-		  if (breg != 0)
-		    macro_build (NULL, "daddu", "d,v,t",
-				 tempreg, tempreg, breg);
-		  macro_build (&offset_expr, s, fmt, op[0],
-			       BFD_RELOC_LO16, tempreg);
-		}
-
-	      if (mips_relax.sequence)
-		relax_end ();
-	      break;
-	    }
-
-	  if (breg == 0)
-	    {
-	      if ((valueT) offset_expr.X_add_number <= MAX_GPREL_OFFSET
-		  && !nopic_need_relax (offset_expr.X_add_symbol, 1))
-		{
-		  relax_start (offset_expr.X_add_symbol);
-		  macro_build (&offset_expr, s, fmt, op[0], BFD_RELOC_GPREL16,
-			       mips_gp_register);
-		  relax_switch ();
-		}
-	      macro_build_lui (&offset_expr, tempreg);
-	      macro_build (&offset_expr, s, fmt, op[0],
-			   BFD_RELOC_LO16, tempreg);
-	      if (mips_relax.sequence)
-		relax_end ();
-	    }
-	  else
-	    {
-	      if ((valueT) offset_expr.X_add_number <= MAX_GPREL_OFFSET
-		  && !nopic_need_relax (offset_expr.X_add_symbol, 1))
-		{
-		  relax_start (offset_expr.X_add_symbol);
-		  macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			       tempreg, breg, mips_gp_register);
-		  macro_build (&offset_expr, s, fmt, op[0],
-			       BFD_RELOC_GPREL16, tempreg);
-		  relax_switch ();
-		}
-	      macro_build_lui (&offset_expr, tempreg);
-	      macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			   tempreg, tempreg, breg);
-	      macro_build (&offset_expr, s, fmt, op[0],
-			   BFD_RELOC_LO16, tempreg);
-	      if (mips_relax.sequence)
-		relax_end ();
-	    }
-	}
-      else if (!mips_big_got)
-	{
-	  int lw_reloc_type = (int) BFD_RELOC_MIPS_GOT16;
-
-	  /* If this is a reference to an external symbol, we want
-	       lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT16)
-	       nop
-	       <op>	op[0],0($tempreg)
-	     Otherwise we want
-	       lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT16)
-	       nop
-	       addiu	$tempreg,$tempreg,<sym>	(BFD_RELOC_LO16)
-	       <op>	op[0],0($tempreg)
-
-	     For NewABI, we want
-	       lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT_PAGE)
-	       <op>	op[0],<sym>($tempreg)   (BFD_RELOC_MIPS_GOT_OFST)
-
-	     If there is a base register, we add it to $tempreg before
-	     the <op>.  If there is a constant, we stick it in the
-	     <op> instruction.  We don't handle constants larger than
-	     16 bits, because we have no way to load the upper 16 bits
-	     (actually, we could handle them for the subset of cases
-	     in which we are not using $at).  */
-	  gas_assert (offset_expr.X_op == O_symbol);
-	  if (HAVE_NEWABI)
-	    {
-	      macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
-			   BFD_RELOC_MIPS_GOT_PAGE, mips_gp_register);
-	      if (breg != 0)
-		macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			     tempreg, tempreg, breg);
-	      macro_build (&offset_expr, s, fmt, op[0],
-			   BFD_RELOC_MIPS_GOT_OFST, tempreg);
-	      break;
-	    }
-	  expr1.X_add_number = offset_expr.X_add_number;
-	  offset_expr.X_add_number = 0;
-	  if (expr1.X_add_number < -0x8000
-	      || expr1.X_add_number >= 0x8000)
-	    as_bad (_("PIC code offset overflow (max 16 signed bits)"));
-	  macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
-		       lw_reloc_type, mips_gp_register);
-	  load_delay_nop ();
-	  relax_start (offset_expr.X_add_symbol);
-	  relax_switch ();
-	  macro_build (&offset_expr, ADDRESS_ADDI_INSN, "t,r,j", tempreg,
-		       tempreg, BFD_RELOC_LO16);
-	  relax_end ();
-	  if (breg != 0)
-	    macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			 tempreg, tempreg, breg);
-	  macro_build (&expr1, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
-	}
-      else if (mips_big_got && !HAVE_NEWABI)
-	{
-	  int gpdelay;
-
-	  /* If this is a reference to an external symbol, we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_MIPS_GOT_HI16)
-	       addu	$tempreg,$tempreg,$gp
-	       lw	$tempreg,<sym>($tempreg) (BFD_RELOC_MIPS_GOT_LO16)
-	       <op>	op[0],0($tempreg)
-	     Otherwise we want
-	       lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT16)
-	       nop
-	       addiu	$tempreg,$tempreg,<sym>	(BFD_RELOC_LO16)
-	       <op>	op[0],0($tempreg)
-	     If there is a base register, we add it to $tempreg before
-	     the <op>.  If there is a constant, we stick it in the
-	     <op> instruction.  We don't handle constants larger than
-	     16 bits, because we have no way to load the upper 16 bits
-	     (actually, we could handle them for the subset of cases
-	     in which we are not using $at).  */
-	  gas_assert (offset_expr.X_op == O_symbol);
-	  expr1.X_add_number = offset_expr.X_add_number;
-	  offset_expr.X_add_number = 0;
-	  if (expr1.X_add_number < -0x8000
-	      || expr1.X_add_number >= 0x8000)
-	    as_bad (_("PIC code offset overflow (max 16 signed bits)"));
-	  gpdelay = reg_needs_delay (mips_gp_register);
-	  relax_start (offset_expr.X_add_symbol);
-	  macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
-		       BFD_RELOC_MIPS_GOT_HI16);
-	  macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t", tempreg, tempreg,
-		       mips_gp_register);
-	  macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
-		       BFD_RELOC_MIPS_GOT_LO16, tempreg);
-	  relax_switch ();
-	  if (gpdelay)
-	    macro_build (NULL, "nop", "");
-	  macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
-		       BFD_RELOC_MIPS_GOT16, mips_gp_register);
-	  load_delay_nop ();
-	  macro_build (&offset_expr, ADDRESS_ADDI_INSN, "t,r,j", tempreg,
-		       tempreg, BFD_RELOC_LO16);
-	  relax_end ();
-
-	  if (breg != 0)
-	    macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			 tempreg, tempreg, breg);
-	  macro_build (&expr1, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
-	}
-      else if (mips_big_got && HAVE_NEWABI)
-	{
-	  /* If this is a reference to an external symbol, we want
-	       lui	$tempreg,<sym>		(BFD_RELOC_MIPS_GOT_HI16)
-	       add	$tempreg,$tempreg,$gp
-	       lw	$tempreg,<sym>($tempreg) (BFD_RELOC_MIPS_GOT_LO16)
-	       <op>	op[0],<ofst>($tempreg)
-	     Otherwise, for local symbols, we want:
-	       lw	$tempreg,<sym>($gp)	(BFD_RELOC_MIPS_GOT_PAGE)
-	       <op>	op[0],<sym>($tempreg)   (BFD_RELOC_MIPS_GOT_OFST)  */
-	  gas_assert (offset_expr.X_op == O_symbol);
-	  expr1.X_add_number = offset_expr.X_add_number;
-	  offset_expr.X_add_number = 0;
-	  if (expr1.X_add_number < -0x8000
-	      || expr1.X_add_number >= 0x8000)
-	    as_bad (_("PIC code offset overflow (max 16 signed bits)"));
-	  relax_start (offset_expr.X_add_symbol);
-	  macro_build (&offset_expr, "lui", LUI_FMT, tempreg,
-		       BFD_RELOC_MIPS_GOT_HI16);
-	  macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t", tempreg, tempreg,
-		       mips_gp_register);
-	  macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
-		       BFD_RELOC_MIPS_GOT_LO16, tempreg);
-	  if (breg != 0)
-	    macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			 tempreg, tempreg, breg);
-	  macro_build (&expr1, s, fmt, op[0], BFD_RELOC_LO16, tempreg);
-
-	  relax_switch ();
-	  offset_expr.X_add_number = expr1.X_add_number;
-	  macro_build (&offset_expr, ADDRESS_LOAD_INSN, "t,o(b)", tempreg,
-		       BFD_RELOC_MIPS_GOT_PAGE, mips_gp_register);
-	  if (breg != 0)
-	    macro_build (NULL, ADDRESS_ADD_INSN, "d,v,t",
-			 tempreg, tempreg, breg);
-	  macro_build (&offset_expr, s, fmt, op[0],
-		       BFD_RELOC_MIPS_GOT_OFST, tempreg);
-	  relax_end ();
-	}
-      else
-	abort ();
+      macro_ld ();
 
       break;
 
@@ -13316,6 +15077,133 @@ macro (struct mips_cl_insn *ip, char *str)
 	}
       break;
 
+    case M_VCST:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, "vcst", op_extra, "?dd,?a", op[0], op[2]);
+      break;
+
+    case M_VFPU_C0_S:
+      macro_build_vfpu_prefix (op[2]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?f1,?ss", op[0], op[1]);
+      break;
+
+    case M_VFPU_C_S_T:
+      macro_build_vfpu_prefix (op[2]);
+      macro_build_vfpu_prefix (op[4]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?f2,?ss,?tt", op[0], op[1], op[3]);
+      break;
+
+    case M_VFPU_D:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra, "?dd", op[0]);
+      break;
+
+    case M_VFPU_D1_S:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d0m,?ss", op[0], op[2]);
+      break;
+
+    case M_VFPU_D1_SP:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d0m,?s", op[0], op[2]);
+      break;
+
+    case M_VFPU_D1_SP_T:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[4]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d0d,?s,?tt", op[0], op[2], op[3]);
+      break;
+
+    case M_VFPU_D1_S_T:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_vfpu_prefix (op[5]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d0d,?ss,?tt", op[0], op[2], op[4]);
+      break;
+
+    case M_VFPU_D2_S:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d1m,?ss", op[0], op[2]);
+      break;
+
+    case M_VFPU_D2_SP:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d1m,?s", op[0], op[2]);
+      break;
+
+    case M_VFPU_DP_S:
+      macro_build_vfpu_prefix (op[2]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?d,?ss", op[0], op[1]);
+      break;
+
+    case M_VFPU_D_S_T:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_vfpu_prefix (op[5]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?ss,?tt", op[0], op[2], op[4]);
+      break;
+
+    case M_VFPU_D_S_T1:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?ss,?t0", op[0], op[2], op[4]);
+      break;
+
+    case M_VFPU_D_S:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?ss", op[0], op[2]);
+      break;
+
+    case M_VFPU_D_S_MC:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?ss,?e", op[0], op[2], op[4]);
+      break;
+
+    case M_VFPU_D_S_SC:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_vfpu_prefix (op[3]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dm,?ss,?b", op[0], op[2], op[4]);
+      break;
+
+    case M_VFPU_D_SP:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?s", op[0], op[2]);
+      break;
+
+    case M_VFPU_D_SP_SC:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?s,?b", op[0], op[2], op[3]);
+      break;
+
+    case M_VFPU_D_SP_TP:
+      macro_build_vfpu_prefix (op[1]);
+      macro_build_extra (NULL, ip->insn_mo->name, op_extra,
+			 "?dd,?s,?t", op[0], op[2], op[3]);
+      break;
+
+    case M_VCMOV:
+      break;
+
     default:
       /* FIXME: Check if this is one of the itbl macros, since they
 	 are added dynamically.  */
@@ -13564,7 +15452,7 @@ mips_lookup_insn (struct hash_control *hash, const char *start,
 		  ssize_t length, unsigned int *opcode_extra)
 {
   char *name, *dot, *p;
-  unsigned int mask, suffix;
+  unsigned int insn2, mask, suffix;
   ssize_t opend;
   struct mips_opcode *insn;
 
@@ -13589,6 +15477,19 @@ mips_lookup_insn (struct hash_control *hash, const char *start,
 	  if (insn && (insn->pinfo2 & INSN2_VU0_CHANNEL_SUFFIX) != 0)
 	    {
 	      *opcode_extra |= mask << mips_vu0_channel_mask.lsb;
+	      goto end;
+	    }
+	}
+
+      p = mips_parse_vfpu_suffix (dot + 1, &mask, &insn2);
+      if (*p == 0 && mask != 0)
+	{
+	  *dot = 0;
+	  insn = (struct mips_opcode *) hash_find (hash, name);
+	  *dot = '.';
+	  if (insn && (insn->pinfo2 & insn2) != 0)
+	    {
+	      *opcode_extra |= mask;
 	      goto end;
 	    }
 	}
@@ -13669,6 +15570,11 @@ mips_ip (char *str, struct mips_cl_insn *insn)
     format = 'f';
   else if (strcmp (first->name, "li.d") == 0)
     format = 'd';
+  else if (strcmp (first->name, "vpfxs") == 0
+	   || strcmp (first->name, "vpfxt") == 0)
+    format = 'p';
+  else if (strcmp (first->name, "vpfxd") == 0)
+    format = 'q';
   else
     format = 0;
   tokens = mips_parse_arguments (str + end, format);
@@ -18729,6 +20635,8 @@ static const struct mips_cpu_info mips_cpu_info_table[] =
 
   /* MIPS II */
   { "r6000",          0, 0,			ISA_MIPS2,    CPU_R6000 },
+  /* Sony PSP "Allegrex" CPU core */
+  { "allegrex",       0, 0,			ISA_MIPS2,    CPU_ALLEGREX },
 
   /* MIPS III */
   { "r4000",          0, 0,			ISA_MIPS3,    CPU_R4000 },

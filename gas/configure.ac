@@ -262,6 +262,9 @@ changequote([,])dnl
 	  mips | mipsbe | mipseb | mipsle | mipsel | mips64 | mips64el)
 	    mips_cpu=from-abi
 	    ;;
+	  mipsallegrex | mipsallegrexel)
+	    mips_cpu=allegrex
+	    ;;
 	  mipsisa32 | mipsisa32el)
 	    mips_cpu=mips32
 	    ;;

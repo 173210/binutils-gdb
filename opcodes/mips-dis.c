@@ -607,6 +607,12 @@ const struct mips_arch_choice mips_arch_choices[] =
     mips_cp0sel_names_mips3264r2, ARRAY_SIZE (mips_cp0sel_names_mips3264r2),
     mips_cp1_names_mips3264, mips_hwr_names_mips3264r2 },
 
+  // TODO: INSN_ALLEGREX
+  // TODO: allegrex cp1 may be different
+  { "allegrex", 1, bfd_mach_mips_allegrex, CPU_ALLEGREX,
+    ISA_MIPS2, 0, mips_cp0_names_numric,
+    NULL, 0, mips_cp1_names_numric, 0, mips_hwr_names_numric },
+
   { "sb1",	1, bfd_mach_mips_sb1, CPU_SB1,
     ISA_MIPS64 | INSN_SB1,  ASE_MIPS3D,
     mips_cp0_names_sb1,

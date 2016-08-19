@@ -6631,8 +6631,18 @@ _bfd_elf_mips_mach (flagword flags)
     case E_MIPS_MACH_LS2F:
       return bfd_mach_mips_loongson_2f;
 
-    case E_MIPS_MACH_LS3A:
-      return bfd_mach_mips_loongson_3a;
+    case E_MIPS_MACH_LS3A_ALLEGREX:
+      switch (flags & EF_MIPS_ARCH)
+        {
+       case E_MIPS_ARCH_2:
+         return bfd_mach_mips_allegrex;
+
+       case E_MIPS_ARCH_64R2:
+         return bfd_mach_mips_loongson_3a;
+
+       default:
+         return 0;
+        }
 
     case E_MIPS_MACH_OCTEON3:
       return bfd_mach_mips_octeon3;
@@ -11916,6 +11926,10 @@ mips_set_isa_flags (bfd *abfd)
       val = E_MIPS_ARCH_5;
       break;
 
+    case bfd_mach_mips_allegrex:
+      val = E_MIPS_ARCH_2 | E_MIPS_MACH_LS3A_ALLEGREX;
+      break;
+
     case bfd_mach_mips_loongson_2e:
       val = E_MIPS_ARCH_3 | E_MIPS_MACH_LS2E;
       break;
@@ -11929,7 +11943,7 @@ mips_set_isa_flags (bfd *abfd)
       break;
 
     case bfd_mach_mips_loongson_3a:
-      val = E_MIPS_ARCH_64R2 | E_MIPS_MACH_LS3A;
+      val = E_MIPS_ARCH_64R2 | E_MIPS_MACH_LS3A_ALLEGREX;
       break;
 
     case bfd_mach_mips_octeon:
@@ -14026,6 +14040,7 @@ static const struct mips_mach_extension mips_mach_extensions[] =
   /* MIPS II extensions.  */
   { bfd_mach_mips4000, bfd_mach_mips6000 },
   { bfd_mach_mipsisa32, bfd_mach_mips6000 },
+  { bfd_mach_mips_allegrex, bfd_mach_mips6000 },
 
   /* MIPS I extensions.  */
   { bfd_mach_mips6000, bfd_mach_mips3000 },

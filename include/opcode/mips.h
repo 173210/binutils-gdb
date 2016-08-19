@@ -334,6 +334,42 @@ extern "C" {
 #define OP_SH_EVAOFFSET		7
 #define OP_MASK_EVAOFFSET	0x1ff
 
+/* VFPU instruction suffix */
+#define OP_MASK_VFPUSUFFIX_LO	1
+#define OP_SH_VFPUSUFFIX_LO		7
+#define OP_MASK_VFPUSUFFIX_HI	1
+#define OP_SH_VFPUSUFFIX_HI		15
+
+/* VFPU register */
+#define VFPU_REG_MASK_MATRIX	7
+#define VFPU_REG_SH_MATRIX	2
+#define VFPU_REG_MASK_FIELD	3
+#define VFPU_REG_SH_FIELD	5
+#define VFPU_REG_MASK_INDEX	3
+#define VFPU_REG_SH_INDEX	0
+
+/* VFPU rotator */
+#define VFPU_ROT_MASK_COS	3
+#define VFPU_ROT_SH_COS	0
+#define VFPU_ROT_MASK_SIN	3
+#define VFPU_ROT_SH_SIN	2
+#define VFPU_ROT_MASK_NEGATE	1
+#define VFPU_ROT_SH_NEGATE	4
+
+#define VFPU_PREFIX_ST_MASK_SWZ	255
+#define VFPU_PREFIX_ST_SH_SWZ	0
+#define VFPU_PREFIX_ST_MASK_ABS	15
+#define VFPU_PREFIX_ST_SH_ABS	8
+#define VFPU_PREFIX_ST_MASK_CONST	15
+#define VFPU_PREFIX_ST_SH_CONST	12
+#define VFPU_PREFIX_ST_MASK_NEGATE	15
+#define VFPU_PREFIX_ST_SH_NEGATE	16
+
+#define VFPU_PREFIX_D_MASK_SAT	255
+#define VFPU_PREFIX_D_SH_SAT	0
+#define VFPU_PREFIX_D_MASK_MASK	15
+#define VFPU_PREFIX_D_SH_MASK	8
+
 /* Enumerates the various types of MIPS operand.  */
 enum mips_operand_type {
   /* Described by mips_int_operand.  */
@@ -417,6 +453,36 @@ enum mips_operand_type {
      been set.  Any suffix used here must match the previous value.  */
   OP_VU0_MATCH_SUFFIX,
 
+  /* A conditional code for VFPU instructions */
+  OP_VFPU_COND,
+
+  /* A conditional code for VFPU instructions with limitations */
+  OP_VFPU_COND_STRICT0,
+
+  /* A conditional code for VFPU instructions with more limitations */
+  OP_VFPU_COND_STRICT1,
+
+  /* A constant code for VFPU instructions */
+  OP_VFPU_CONST,
+
+  /* A half float for VFPU instructions */
+  OP_VFPU_HFLOAT,
+
+  /* A immediate offset for VFPU instructions */
+  OP_VFPU_OFFSET,
+
+  /* A rotator code for VFPU instructions */
+  OP_VFPU_ROT,
+
+  /* A read/write access code for VFPU instructions */
+  OP_VFPU_RWB,
+
+  /* A prefix for Rs and Rt of VFPU instructions */
+  OP_VFPU_PREFIX_ST,
+
+  /* A prefix for Rd of VFPU instructions */
+  OP_VFPU_PREFIX_D,
+
   /* An index selected by an integer, e.g. [1].  */
   OP_IMM_INDEX,
 
@@ -467,6 +533,24 @@ enum mips_reg_operand_type {
 
   /* Integer registers $vi0-$vi31.  */
   OP_REG_VI,
+
+  /* VFPU registers S000-S333 */
+  OP_REG_VFPU_SCALAR,
+
+  /* VFPU registers C000-C332 and R000-R323 */
+  OP_REG_VFPU_VECTOR_P,
+  OP_REG_VFPU_VECTOR_T,
+  OP_REG_VFPU_VECTOR_Q,
+  OP_REG_VFPU_VECTOR_SUFFIX,
+
+  /* VFPU registers M000-M322 and E000-E322 */
+  OP_REG_VFPU_MATRIX_P,
+  OP_REG_VFPU_MATRIX_T,
+  OP_REG_VFPU_MATRIX_Q,
+  OP_REG_VFPU_MATRIX_SUFFIX,
+
+  /* VFPU control registers $128-$255 */
+  OP_REG_VFPU_CR,
 
   /* R5900 VU0 registers $I, $Q, $R and $ACC.  */
   OP_REG_R5900_I,
@@ -1106,6 +1190,18 @@ struct mips_opcode
 #define INSN2_VU0_CHANNEL_SUFFIX    0x00004000
 /* Instruction has a forbidden slot.  */
 #define INSN2_FORBIDDEN_SLOT        0x00008000
+/* Instruction has a VFPU register which can conflict with others */
+#define INSN2_VFPU_CONFLICT         0x00010000
+/* FIXME: figure out this unknown flag */
+#define INSN2_VFPU_CONFLICT_L       0x00040000
+/* Instruction may have VFPU suffix 's' */
+#define INSN2_VFPU_SUFFIX_S         0x00080000
+/* Instruction may have VFPU suffix 'p' */
+#define INSN2_VFPU_SUFFIX_P         0x00100000
+/* Instruction may have VFPU suffix 't' */
+#define INSN2_VFPU_SUFFIX_T         0x00200000
+/* Instruction may have VFPU suffix 'q' */
+#define INSN2_VFPU_SUFFIX_Q         0x00300000
 
 /* Masks used to mark instructions to indicate which MIPS ISA level
    they were introduced in.  INSN_ISA_MASK masks an enumeration that
@@ -1322,6 +1418,7 @@ static const unsigned int mips_isa_table[] = {
 #define CPU_MIPS64R3	66
 #define CPU_MIPS64R5	68
 #define CPU_MIPS64R6	69
+#define CPU_ALLEGREX    10111431        /* octal 'AL', 31.  */
 #define CPU_SB1         12310201        /* octal 'SB', 01.  */
 #define CPU_LOONGSON_2E 3001
 #define CPU_LOONGSON_2F 3002
@@ -1692,6 +1789,7 @@ enum
   M_USH_AB,
   M_USW_AB,
   M_USD_AB,
+  M_VFPU,
   M_XOR_I,
   M_COP0,
   M_COP1,

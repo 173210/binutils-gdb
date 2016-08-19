@@ -295,6 +295,7 @@ ALL_EMULATION_SOURCES = \
 	eelf_i386_sol2.c \
 	eelf_i386_vxworks.c \
 	eelf_iamcu.c \
+    elf32_mipsallegrexel_psp.c \
 	eelf_s390.c \
 	egld960.c \
 	egld960coff.c \
@@ -1341,6 +1342,9 @@ eelf_i386_vxworks.c: $(srcdir)/emulparams/elf_i386_vxworks.sh \
 
 eelf_iamcu.c: $(srcdir)/emulparams/elf_iamcu.sh \
   $(ELF_X86_DEPS) $(srcdir)/scripttempl/elf.sc ${GEN_DEPENDS}
+
+eelf_mipsallegrexel_psp.c: $(srcdir)/emulparams/elf_mipsallegrexel_psp.sh \
+  $(ELF_DEPS) $(srcdir)/scripttempl/elf_psp.sc ${GEN_DEPENDS}
 
 eelf_s390.c: $(srcdir)/emulparams/elf_s390.sh \
   $(ELF_DEPS) $(srcdir)/scripttempl/elf.sc ${GEN_DEPENDS}

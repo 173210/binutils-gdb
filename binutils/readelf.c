@@ -2146,6 +2146,7 @@ get_file_type (unsigned e_type)
     case ET_EXEC:	return _("EXEC (Executable file)");
     case ET_DYN:	return _("DYN (Shared object file)");
     case ET_CORE:	return _("CORE (Core file)");
+    case ET_PSPEXEC: return _("PSPEXEC (PSP executable file)");
 
     default:
       if ((e_type >= ET_LOPROC) && (e_type <= ET_HIPROC))
@@ -3225,7 +3226,7 @@ get_machine_flags (unsigned e_flags, unsigned e_machine)
 	    case E_MIPS_MACH_9000: strcat (buf, ", 9000"); break;
   	    case E_MIPS_MACH_LS2E: strcat (buf, ", loongson-2e"); break;
   	    case E_MIPS_MACH_LS2F: strcat (buf, ", loongson-2f"); break;
-  	    case E_MIPS_MACH_LS3A: strcat (buf, ", loongson-3a"); break;
+  	    case E_MIPS_MACH_LS3A_ALLEGREX: strcat (buf, ", loongson-3a/allegrex"); break;
 	    case E_MIPS_MACH_OCTEON: strcat (buf, ", octeon"); break;
 	    case E_MIPS_MACH_OCTEON2: strcat (buf, ", octeon2"); break;
 	    case E_MIPS_MACH_OCTEON3: strcat (buf, ", octeon3"); break;
